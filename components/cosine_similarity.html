@@ -1,0 +1,559 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Source+Serif+4:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+  :root { --bg: #000000; --fg: #ECEFF4; --muted: #7D8590; --blue: #58C4DD; --yellow: #F7D96F; }
+  html, body { margin: 0; background: transparent; font-family: "Source Serif 4", Georgia, serif; }
+  .wrap { background: var(--bg); border: 1px solid #22262E; border-radius: 14px; overflow: hidden; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 14px;
+         border-bottom: 1px solid #22262E; font-family: "JetBrains Mono", monospace; font-size: 13px; color: var(--fg); }
+  .chip { color: var(--muted); border: 1px solid #2C313A; border-radius: 999px; padding: 4px 12px;
+          cursor: pointer; user-select: none; transition: all .25s; }
+  .chip:hover { color: var(--fg); border-color: #444B57; }
+  .chip.done { color: var(--fg); }
+  .chip.active { color: var(--bg); background: var(--yellow); border-color: var(--yellow); }
+  .spacer { flex: 1; }
+  button { font-family: inherit; font-size: 13px; color: var(--fg); background: #1A1E25;
+           border: 1px solid #2C313A; border-radius: 8px; padding: 5px 12px; cursor: pointer; }
+  button:hover { border-color: var(--blue); }
+  button.primary { background: var(--blue); color: var(--bg); border-color: var(--blue); font-weight: 700; }
+  .extra { display: none; align-items: center; gap: 8px; }
+  .extra.show { display: flex; }
+  input[type=range] { accent-color: var(--blue); width: 140px; }
+  svg { display: block; width: 100%; height: auto; touch-action: none; user-select: none; }
+  .mono { font-family: "JetBrains Mono", monospace; }
+  .serif { font-family: "Source Serif 4", Georgia, serif; }
+  .handle { cursor: grab; }
+  .handle:active { cursor: grabbing; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <span class="chip" data-scene="1">1 · angle</span>
+    <span class="chip" data-scene="2">2 · direction</span>
+    <span class="chip" data-scene="3">3 · length</span>
+    <span class="chip" data-scene="4">4 · +1 to −1</span>
+    <span class="chip" data-scene="5">5 · 50 dimensions</span>
+    <span class="extra" id="extra3">stretch the 2nd word ×<input type="range" id="stretch" min="0.25" max="3" step="0.05" value="1"><span id="kval">1.00</span></span>
+    <span class="extra" id="extra4"><button id="sweep">sweep again ↻</button></span>
+    <span class="extra" id="extra5"></span>
+    <span id="pickers">word 1 <select id="w1"></select> word 2 <select id="w2"></select></span>
+    <span class="spacer"></span>
+    <button id="back">◀</button>
+    <button id="next" class="primary">next ▶</button>
+  </div>
+  <svg id="stage" viewBox="0 0 1200 720" preserveAspectRatio="xMidYMid meet"></svg>
+</div>
+
+<script>
+const W = __DATA__;                 // 16 real GloVe words in 2D, their real 50-D cosines, the preset pairs
+const NS = "http://www.w3.org/2000/svg";
+const svg = document.getElementById("stage");
+const FG = "#ECEFF4", MUTED = "#7D8590", BG = "#000000", GRID = "#1B2A3A", GRID2 = "#10161F", AXIS = "#3C4A5C";
+const YELLOW = "#F7D96F", BLUE = "#58C4DD", GREEN = "#83C167", RED = "#FC6255", PINK = "#D147BD";
+
+// ------------------------------------------------------------------ helpers
+function el(tag, attrs = {}, parent = svg) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  parent.appendChild(e);
+  return e;
+}
+const set = (e, attrs) => { for (const k in attrs) e.setAttribute(k, attrs[k]); return e; };
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const smooth = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+const f2 = v => (Math.abs(v) < .005 ? 0 : v).toFixed(2);
+const f1 = v => (Math.abs(v) < .05 ? 0 : v).toFixed(1);
+const dot = (u, v) => u.reduce((s, x, i) => s + x * v[i], 0);
+const norm = u => Math.sqrt(dot(u, u));
+const unit = u => { const n = norm(u) || 1; return u.map(x => x / n); };
+const cosOf = (u, v) => dot(u, v) / ((norm(u) * norm(v)) || 1);
+const ang = u => Math.atan2(u[1], u[0]);
+function hex2rgb(h) { return [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)); }
+const C0 = hex2rgb("#1E232B"), CN = hex2rgb(BLUE), CP = hex2rgb(RED);
+function valueColor(v, scale = 2) {
+  const t = clamp(Math.abs(v) / scale), c = v < 0 ? CN : CP;
+  const m = C0.map((a, i) => Math.round(lerp(a, c[i], t)));
+  return `rgb(${m[0]},${m[1]},${m[2]})`;
+}
+
+let runId = 0;
+class Cancel extends Error {}
+function tween(ms, fn, easing = smooth) {
+  const my = runId;
+  return new Promise((resolve, reject) => {
+    const t0 = performance.now();
+    function frame(now) {
+      if (my !== runId) return reject(new Cancel());
+      const t = clamp((now - t0) / ms);
+      fn(easing(t)); render();
+      if (t < 1) requestAnimationFrame(frame); else resolve();
+    }
+    requestAnimationFrame(frame);
+  });
+}
+const wait = ms => tween(ms, () => {});
+// animate several numeric fields of the state at once
+function to(ms, targets, easing = smooth) {
+  const from = {};
+  for (const k in targets) from[k] = st[k];
+  return tween(ms, t => { for (const k in targets) st[k] = lerp(from[k], targets[k], t); }, easing);
+}
+
+// ------------------------------------------------------------------ state
+const st = {
+  scene: 1, wa: W.words.indexOf("great"), wb: W.words.indexOf("excellent"), freeB: false,
+  a: null, b: null, k: 1,
+  scale: 72, cx: 400, cy: 420,            // the camera of the plane
+  normT: 0,                                // 0 = raw vectors, 1 = unit vectors
+  planeOp: 1, unitOp: 0, projOp: 0, distOp: 0, panelOp: 1, graphOp: 0, ndOp: 0,
+};
+// any two vectors span a plane: draw word 1 along a fixed direction, word 2 at its exact angle, lengths exact
+const V = W.words.map(w => W.vec50[w]);
+const MAXN = Math.max(...V.map(norm)), SCALE = 3.4 / MAXN, BASE = 15 * Math.PI / 180;
+function pairCoords(i, j) {
+  const t = Math.acos(clamp(cosOf(V[i], V[j]), -1, 1)), na = norm(V[i]) * SCALE, nb = norm(V[j]) * SCALE;
+  return [[na * Math.cos(BASE), na * Math.sin(BASE)], [nb * Math.cos(BASE + t), nb * Math.sin(BASE + t)]];
+}
+[st.a, st.b] = pairCoords(st.wa, st.wb);
+async function setWords(i, j) {           // swing the arrows to a new pair of words
+  if (i === j) return;
+  const [a0, b0] = [st.a.slice(), st.b.slice()], [a1, b1] = pairCoords(i, j);
+  st.wa = i; st.wb = j; st.freeB = false;
+  const la0 = norm(a0), lb0 = norm(b0), la1 = norm(a1), lb1 = norm(b1), ga0 = ang(a0), gb0 = ang(b0), ga1 = ang(a1);
+  let gb1 = ang(b1); while (gb1 - gb0 > Math.PI) gb1 -= 2 * Math.PI; while (gb0 - gb1 > Math.PI) gb1 += 2 * Math.PI;
+  await tween(700, t => { const la = lerp(la0, la1, t), lb = lerp(lb0, lb1, t), ga = lerp(ga0, ga1, t), gb = lerp(gb0, gb1, t);
+    st.a = [la * Math.cos(ga), la * Math.sin(ga)]; st.b = [lb * Math.cos(gb), lb * Math.sin(gb)]; });
+}
+const R = { x0: 30, y0: 100, x1: 770, y1: 708 };          // the visible part of the plane
+const toS = ([x, y]) => [st.cx + x * st.scale, st.cy - y * st.scale];
+const toW = (px, py) => [(px - st.cx) / st.scale, (st.cy - py) / st.scale];
+
+// ------------------------------------------------------------------ layers
+const defs = el("defs");
+el("rect", { x: R.x0, y: R.y0, width: R.x1 - R.x0, height: R.y1 - R.y0 }, el("clipPath", { id: "plane" }, defs));
+const L = {};
+for (const n of ["caption", "plane", "panel", "graph", "nd"]) L[n] = el("g", { id: n });
+const planeClip = el("g", { "clip-path": "url(#plane)" }, L.plane);
+const gridG = el("g", {}, planeClip);
+const drawG = el("g", {}, planeClip);
+
+const capMain = el("text", { x: 600, y: 46, "text-anchor": "middle", class: "serif", "font-size": 26, fill: FG, "font-weight": 600 }, L.caption);
+const capSub = el("text", { x: 600, y: 76, "text-anchor": "middle", class: "serif", "font-size": 17, fill: MUTED, "font-style": "italic" }, L.caption);
+async function say(main, sub = "") {
+  await tween(200, t => { capMain.style.opacity = 1 - t; capSub.style.opacity = 1 - t; });
+  capMain.textContent = main; capSub.textContent = sub;
+  await tween(350, t => { capMain.style.opacity = t; capSub.style.opacity = t; });
+}
+
+// ------------------------------------------------------------------ the plane
+let lastGrid = null;
+function drawGrid() {
+  const key = `${st.scale.toFixed(2)}|${st.cx}|${st.cy}`;
+  if (key === lastGrid) return;
+  lastGrid = key;
+  gridG.replaceChildren();
+  const [wx0, wy1] = toW(R.x0, R.y0), [wx1, wy0] = toW(R.x1, R.y1);
+  const step = st.scale > 150 ? .25 : st.scale > 50 ? .5 : 1;
+  for (let x = Math.ceil(wx0 / step) * step; x <= wx1; x += step) {
+    const major = Math.abs(x - Math.round(x)) < 1e-6, [px] = toS([x, 0]);
+    el("line", { x1: px, x2: px, y1: R.y0, y2: R.y1, stroke: major ? GRID : GRID2, "stroke-width": major ? 1.2 : 1 }, gridG);
+    if (major && Math.abs(x) > 1e-6) {
+      const t = el("text", { x: px, y: st.cy + 18, "text-anchor": "middle", class: "mono", "font-size": 11, fill: MUTED }, gridG);
+      t.textContent = Math.round(x);
+    }
+  }
+  for (let y = Math.ceil(wy0 / step) * step; y <= wy1; y += step) {
+    const major = Math.abs(y - Math.round(y)) < 1e-6, [, py] = toS([0, y]);
+    el("line", { x1: R.x0, x2: R.x1, y1: py, y2: py, stroke: major ? GRID : GRID2, "stroke-width": major ? 1.2 : 1 }, gridG);
+    if (major && Math.abs(y) > 1e-6) {
+      const t = el("text", { x: st.cx - 10, y: py + 4, "text-anchor": "end", class: "mono", "font-size": 11, fill: MUTED }, gridG);
+      t.textContent = Math.round(y);
+    }
+  }
+  el("line", { x1: R.x0, x2: R.x1, y1: st.cy, y2: st.cy, stroke: AXIS, "stroke-width": 2 }, gridG);
+  el("line", { x1: st.cx, x2: st.cx, y1: R.y0, y2: R.y1, stroke: AXIS, "stroke-width": 2 }, gridG);
+}
+
+const unitCircle = el("circle", { fill: "none", stroke: FG, "stroke-width": 1.5, "stroke-dasharray": "4 6" }, drawG);
+const distLine = el("line", { stroke: RED, "stroke-width": 3, "stroke-dasharray": "8 6" }, drawG);
+const distLabel = el("text", { class: "mono", "font-size": 16, fill: RED, "text-anchor": "middle" }, drawG);
+const projDrop = el("line", { stroke: MUTED, "stroke-width": 1.5, "stroke-dasharray": "5 5" }, drawG);
+const projSeg = el("line", { stroke: GREEN, "stroke-width": 7, "stroke-linecap": "round" }, drawG);
+const projLabel = el("text", { class: "serif", "font-size": 20, fill: GREEN, "font-style": "italic", "text-anchor": "middle" }, drawG);
+const arc = el("path", { fill: "rgba(236,239,244,.08)", stroke: FG, "stroke-width": 2 }, drawG);
+const arcLabel = el("text", { class: "serif", "font-size": 20, fill: FG, "font-style": "italic", "text-anchor": "middle", "dominant-baseline": "central" }, drawG);
+
+function makeArrow(color, name) {
+  const g = el("g", {}, drawG);
+  return {
+    line: el("line", { stroke: color, "stroke-width": 5, "stroke-linecap": "round" }, g),
+    head: el("polygon", { fill: color }, g),
+    label: Object.assign(el("text", { class: "mono", "font-size": 20, fill: color, "font-weight": 700,
+                                      "text-anchor": "middle", "dominant-baseline": "central" }, g), { textContent: name }),
+    handle: el("circle", { r: 22, fill: color, "fill-opacity": 0, class: "handle" }, g),
+    ring: el("circle", { r: 9, fill: BG, stroke: color, "stroke-width": 3, "pointer-events": "none" }, g),
+  };
+}
+const arrowA = makeArrow(YELLOW, "a"), arrowB = makeArrow(BLUE, "b");
+
+function setArrow(ar, v) {
+  const [x0, y0] = toS([0, 0]), [x1, y1] = toS(v);
+  const len = Math.hypot(x1 - x0, y1 - y0) || 1, ux = (x1 - x0) / len, uy = (y1 - y0) / len;
+  const hl = Math.min(20, len * .45), hw = hl * .55;
+  const bx = x1 - ux * hl, by = y1 - uy * hl;
+  set(ar.line, { x1: x0, y1: y0, x2: bx, y2: by });
+  set(ar.head, { points: `${x1},${y1} ${bx - uy * hw},${by + ux * hw} ${bx + uy * hw},${by - ux * hw}` });
+  set(ar.label, { x: x1 + ux * 34 - uy * 4, y: y1 + uy * 26 + ux * 4 });
+  set(ar.handle, { cx: x1, cy: y1 });
+  set(ar.ring, { cx: x1, cy: y1 });
+}
+
+// ------------------------------------------------------------------ the panel (right side)
+const PX = 820;
+const lines = [];
+for (let i = 0; i < 7; i++)
+  lines.push(el("text", { x: PX, y: 150 + i * 36, class: "mono", "font-size": 16, fill: FG }, L.panel));
+const bigCos = el("text", { x: PX, y: 470, class: "mono", "font-size": 44, fill: FG, "font-weight": 700 }, L.panel);
+const bigLabel = el("text", { x: PX, y: 472, class: "serif", "font-size": 13, fill: MUTED, "font-style": "italic" }, L.panel);
+bigLabel.textContent = "exact: the real cosine of the two 50-number vectors";
+// gauge -1 .. +1
+const GX0 = PX + 20, GX1 = 1110, GY = 560;
+const gauge = el("g", {}, L.panel);
+const gradient = el("linearGradient", { id: "gaugeGrad", x1: 0, x2: 1, y1: 0, y2: 0 }, defs);
+[[0, BLUE], [.5, "#1E232B"], [1, RED]].forEach(([o, c]) => el("stop", { offset: o, "stop-color": c }, gradient));
+el("rect", { x: GX0, y: GY - 7, width: GX1 - GX0, height: 14, rx: 7, fill: "url(#gaugeGrad)" }, gauge);
+[[-1, "−1", "opposite"], [0, "0", "unrelated"], [1, "+1", "same direction"]].forEach(([v, s, word]) => {
+  const x = lerp(GX0, GX1, (v + 1) / 2);
+  el("line", { x1: x, x2: x, y1: GY + 10, y2: GY + 18, stroke: MUTED }, gauge);
+  const t = el("text", { x, y: GY + 36, "text-anchor": "middle", class: "mono", "font-size": 14, fill: FG }, gauge); t.textContent = s;
+  const w = el("text", { x, y: GY + 56, "text-anchor": "middle", class: "serif", "font-size": 14, fill: MUTED, "font-style": "italic" }, gauge); w.textContent = word;
+});
+const marker = el("polygon", { fill: FG }, gauge);
+
+// the cos curve of scene 4
+const GR = { x0: PX + 30, x1: 1150, y0: 405, y1: 625 };
+const gx = deg => lerp(GR.x0, GR.x1, deg / 360), gy = c => lerp(GR.y1, GR.y0, (c + 1) / 2);
+(function buildGraph() {
+  const g = L.graph;
+  el("rect", { x: GR.x0, y: GR.y0, width: GR.x1 - GR.x0, height: GR.y1 - GR.y0, fill: "#07090D", stroke: "#22262E" }, g);
+  [0, 90, 180, 270, 360].forEach(d => {
+    el("line", { x1: gx(d), x2: gx(d), y1: GR.y0, y2: GR.y1, stroke: GRID }, g);
+    const t = el("text", { x: gx(d), y: GR.y1 + 20, "text-anchor": "middle", class: "mono", "font-size": 12, fill: MUTED }, g); t.textContent = d + "°";
+  });
+  [-1, 0, 1].forEach(c => {
+    el("line", { x1: GR.x0, x2: GR.x1, y1: gy(c), y2: gy(c), stroke: c === 0 ? AXIS : GRID }, g);
+    const t = el("text", { x: GR.x0 - 8, y: gy(c) + 4, "text-anchor": "end", class: "mono", "font-size": 12, fill: MUTED }, g); t.textContent = c > 0 ? "+1" : c;
+  });
+  let d = "";
+  for (let k = 0; k <= 360; k += 3) d += (k ? "L" : "M") + gx(k) + "," + gy(Math.cos(k * Math.PI / 180));
+  el("path", { d, fill: "none", stroke: "#2E3A48", "stroke-width": 2 }, g);
+  [[0, "same", 1], [90, "orthogonal", 0], [180, "opposite", -1], [270, "orthogonal", 0]].forEach(([deg, s, c]) => {
+    const t = el("text", { x: gx(deg) + (deg === 0 ? 6 : 0), y: gy(c) + (c > 0 ? 18 : c < 0 ? -10 : -10),
+                           "text-anchor": deg === 0 ? "start" : "middle", class: "serif", "font-size": 13, fill: MUTED, "font-style": "italic" }, g);
+    t.textContent = s;
+  });
+  const t = el("text", { x: GR.x0, y: GR.y0 - 14, class: "serif", "font-size": 16, fill: FG }, g);
+  t.textContent = "cos θ as the 2nd arrow turns around the 1st";
+})();
+const traced = el("path", { fill: "none", stroke: YELLOW, "stroke-width": 3.5 }, L.graph);
+const graphDot = el("circle", { r: 7, fill: YELLOW }, L.graph);
+let tracePts = [];
+
+// ------------------------------------------------------------------ render
+const B = () => st.b.map(x => x * st.k);
+function displayed() {
+  const a = st.a, b = B(), ua = unit(a), ub = unit(b);
+  return [a.map((x, i) => lerp(x, ua[i], st.normT)), b.map((x, i) => lerp(x, ub[i], st.normT))];
+}
+const ccwDeg = (a, b) => { let d = (ang(b) - ang(a)) * 180 / Math.PI; return ((d % 360) + 360) % 360; };
+
+function render() {
+  L.plane.style.opacity = st.planeOp; L.panel.style.opacity = st.panelOp;
+  L.graph.style.opacity = st.graphOp; L.nd.style.opacity = st.ndOp;
+  L.graph.style.display = st.graphOp > .01 ? "" : "none";
+  L.nd.style.display = st.ndOp > .01 ? "" : "none";
+  gauge.style.opacity = 1 - st.graphOp;
+  drawGrid();
+
+  const [da, db] = displayed(), a = st.a, b = B();
+  setArrow(arrowA, da); setArrow(arrowB, db);
+  const nA = W.words[st.wa], nB = st.freeB ? "" : W.words[st.wb] + (Math.abs(st.k - 1) > .01 ? ` ×${st.k.toFixed(1)}` : "");
+  arrowA.label.textContent = nA; arrowB.label.textContent = nB;
+
+  const c = cosOf(a, b), theta = Math.acos(clamp(c, -1, 1)) * 180 / Math.PI;
+
+  // angle arc, on the smaller side
+  const aa = ang(da), ab = ang(db);
+  let delta = ab - aa; while (delta > Math.PI) delta -= 2 * Math.PI; while (delta < -Math.PI) delta += 2 * Math.PI;
+  const rr = Math.min(70, .45 * Math.min(norm(da), norm(db)) * st.scale), [ox, oy] = toS([0, 0]);
+  const p1 = [ox + rr * Math.cos(aa), oy - rr * Math.sin(aa)], p2 = [ox + rr * Math.cos(aa + delta), oy - rr * Math.sin(aa + delta)];
+  set(arc, { d: `M${ox},${oy} L${p1[0]},${p1[1]} A${rr},${rr} 0 0 ${delta > 0 ? 0 : 1} ${p2[0]},${p2[1]} Z` });
+  const mid = aa + delta / 2;
+  set(arcLabel, { x: ox + (rr + 22) * Math.cos(mid), y: oy - (rr + 22) * Math.sin(mid) });
+  arcLabel.textContent = "θ";
+
+  // unit circle, projection of b on a, distance between the tips
+  set(unitCircle, { cx: ox, cy: oy, r: st.scale }); unitCircle.style.opacity = st.unitOp;
+  const ua = unit(da), pl = dot(db, ua), proj = ua.map(x => x * pl), [qx, qy] = toS(proj), [tbx, tby] = toS(db);
+  set(projDrop, { x1: tbx, y1: tby, x2: qx, y2: qy }); projDrop.style.opacity = st.projOp;
+  set(projSeg, { x1: ox, y1: oy, x2: qx, y2: qy }); projSeg.style.opacity = st.projOp;
+  set(projLabel, { x: (ox + qx) / 2 + ua[1] * 26, y: (oy + qy) / 2 + ua[0] * 26 }); projLabel.style.opacity = st.projOp;
+  projLabel.textContent = `cos θ = ${f2(c)}`;
+  const [tax, tay] = toS(da);
+  set(distLine, { x1: tax, y1: tay, x2: tbx, y2: tby }); distLine.style.opacity = st.distOp;
+  set(distLabel, { x: (tax + tbx) / 2 + 14, y: (tay + tby) / 2 - 12 }); distLabel.style.opacity = st.distOp;
+  const dist = norm(a.map((x, i) => x - b[i]));
+  distLabel.textContent = `distance ${f2(dist)}`;
+
+  // panel text, depending on the scene
+  const Y = `fill="${YELLOW}"`, Bl = `fill="${BLUE}"`, G = `fill="${GREEN}"`, Rd = `fill="${RED}"`, M = `fill="${MUTED}"`;
+  let rows = [];
+  const A = `<tspan ${Y}>${nA}</tspan>`, Bn = `<tspan ${Bl}>${W.words[st.wb]}</tspan>`;
+  const realRow = `<tspan ${M}>(coordinates in their plane)</tspan>`;
+  if (st.scene === 1 || st.scene === 5) {
+    rows = [`${A} = (${f1(a[0])}, ${f1(a[1])})`, `${Bn} = (${f1(b[0])}, ${f1(b[1])})`,
+            `dot = <tspan ${Y}>${f1(a[0])}</tspan>×<tspan ${Bl}>${f1(b[0])}</tspan> + <tspan ${Y}>${f1(a[1])}</tspan>×<tspan ${Bl}>${f1(b[1])}</tspan> = ${f2(dot(a, b))}`,
+            `cos θ = ${f2(dot(a, b))} / (${f2(norm(a))} × ${f2(norm(b))})`,
+            `<tspan ${M}>= dot / (product of the lengths)</tspan>`,
+            realRow];
+  } else if (st.scene === 2) {
+    const ua2 = unit(a), ub2 = unit(b);
+    rows = [`${A} / its length = (${f2(ua2[0])}, ${f2(ua2[1])})`,
+            `${Bn} / its length = (${f2(ub2[0])}, ${f2(ub2[1])})`,
+            `<tspan ${M}>both now have length 1</tspan>`,
+            `cos θ = their dot = <tspan ${G}>the green shadow</tspan>`,
+            `<tspan ${M}>θ = ${theta.toFixed(1)}°</tspan>`,
+            realRow];
+  } else if (st.scene === 3) {
+    rows = [`${Bn} stretched ×${st.k.toFixed(2)} = (${f1(b[0])}, ${f1(b[1])})`,
+            `its length = ${f2(norm(b))}`,
+            `<tspan ${Rd}>distance between the tips = ${f2(dist)}</tspan>`,
+            `<tspan ${M}>the length moves the distance,</tspan>`,
+            `<tspan ${M}>not the angle:</tspan>`,
+            realRow];
+  } else if (st.scene === 4) {
+    rows = [`θ (counter-clockwise) = ${ccwDeg(a, b).toFixed(0)}°`,
+            `<tspan ${M}>+1 same way, 0 at right angles,</tspan>`,
+            `<tspan ${M}>−1 opposite</tspan>`, "", "", ""];
+  }
+  lines.forEach((t, i) => { t.innerHTML = rows[i] || ""; });
+  bigCos.innerHTML = `cos θ = <tspan fill="${c >= 0 ? RED : BLUE}">${c >= 0 ? " " : ""}${c.toFixed(2)}</tspan>`;
+  set(bigCos, { y: st.scene === 4 ? 345 : 430 });
+  const mx = lerp(GX0, GX1, (clamp(c, -1, 1) + 1) / 2);
+  set(marker, { points: `${mx},${GY - 12} ${mx - 9},${GY - 26} ${mx + 9},${GY - 26}` });
+
+  // scene 4: the dot on the cos curve
+  const deg = ccwDeg(a, b);
+  bigLabel.style.opacity = st.scene === 4 ? 0 : 1;
+  set(graphDot, { cx: gx(deg), cy: gy(Math.cos(deg * Math.PI / 180)) });
+  set(traced, { d: tracePts.length ? "M" + tracePts.map(p => p.join(",")).join("L") : "" });
+}
+
+// ------------------------------------------------------------------ dragging the tips
+let dragging = null;
+function svgPoint(evt) {
+  const p = svg.createSVGPoint(); p.x = evt.clientX; p.y = evt.clientY;
+  return p.matrixTransform(svg.getScreenCTM().inverse());
+}
+for (const [ar, key] of [[arrowA, "a"], [arrowB, "b"]]) {
+  ar.handle.addEventListener("pointerdown", e => {
+    if (st.planeOp < .5) return;
+    dragging = key; ar.handle.setPointerCapture(e.pointerId);
+    if (st.scene === 4) runId++;                     // grabbing stops the sweep
+  });
+}
+svg.addEventListener("pointermove", e => {
+  if (!dragging) return;
+  const p = svgPoint(e);
+  if (st.scene !== 4 || dragging !== "b") return;     // words are picked in the toolbar; in step 4, turn the 2nd arrow freely
+  const w = toW(clamp(p.x, R.x0, R.x1), clamp(p.y, R.y0, R.y1));
+  if (Math.hypot(w[0], w[1]) < .2) return;
+  st.freeB = true; st.b = unit(w).map(x => x * norm(st.b));
+  if (st.scene === 4) tracePts = [];
+  render();
+});
+svg.addEventListener("pointerup", () => dragging = null);
+svg.addEventListener("pointercancel", () => dragging = null);
+
+// ------------------------------------------------------------------ scene 5: the 50 real numbers of two words
+const D = 50, PER = 25, CW = 44, CH = 28, NX0 = 600 - PER * CW / 2;
+const ROW = { a: 170, b: 262, p: 384 };            // each vector on 2 rows of 25
+const cx = i => NX0 + (i % PER + .5) * CW, cy = (row, i) => ROW[row] + Math.floor(i / PER) * (CH + 4);
+function cell(g, x, y, v, scale = 1.2) {
+  const grp = el("g", { transform: `translate(${x},${y})` }, g);
+  el("rect", { x: -CW / 2 + 2, y: -CH / 2, width: CW - 4, height: CH, rx: 4, fill: valueColor(v, scale) }, grp);
+  const t = el("text", { "text-anchor": "middle", "dominant-baseline": "central", class: "mono", "font-size": 10,
+                         fill: Math.abs(v) > scale * .7 ? BG : FG }, grp);
+  t.textContent = (Math.abs(v) < .005 ? 0 : v).toFixed(2);
+  return grp;
+}
+
+async function playND(k) {
+  const my = ++runId;
+  st.ndOp = 1;
+  L.nd.replaceChildren();
+  const [wa, wb, kind] = W.presets[k], a = W.vec50[wa], b = W.vec50[wb];
+  document.querySelectorAll("#extra5 button").forEach((btn, i) => btn.classList.toggle("primary", i === k));
+  const g = L.nd;
+  [[wa, ROW.a, YELLOW], [wb, ROW.b, BLUE], [`${wa} × ${wb}, number by number`, ROW.p, GREEN]].forEach(([s_, y, c]) => {
+    const t = el("text", { x: NX0 + 2, y: y - CH / 2 - 10, class: "mono", "font-size": 16, "font-weight": 700, fill: c }, g);
+    t.textContent = s_;
+  });
+  const aCells = a.map((v, i) => cell(g, cx(i), cy("a", i), v)), bCells = b.map((v, i) => cell(g, cx(i), cy("b", i), v));
+  [...aCells, ...bCells].forEach(c => c.style.opacity = 0);
+  await tween(700, t => [...aCells, ...bCells].forEach((c, j) => c.style.opacity = clamp(t * 2 - (j % D) / D)), x => x);
+  await say(`“${wa}” and “${wb}”: 50 numbers each`, "the real GloVe vectors: multiply them number by number, add up, divide by the two lengths");
+
+  // multiply, number by number (all at once, in a wave)
+  const prods = a.map((v, i) => v * b[i]);
+  const movers = a.map((v, i) => [cell(g, cx(i), cy("a", i), v), cell(g, cx(i), cy("b", i), b[i])]);
+  await tween(1400, t => movers.forEach(([ca, cb], i) => {
+    const u = smooth(clamp(t * 1.6 - i / D * .6));
+    ca.setAttribute("transform", `translate(${cx(i)},${lerp(cy("a", i), cy("p", i), u)}) scale(${1 - .3 * u})`);
+    cb.setAttribute("transform", `translate(${cx(i)},${lerp(cy("b", i), cy("p", i), u)}) scale(${1 - .3 * u})`);
+    ca.style.opacity = cb.style.opacity = 1 - u;
+  }), x => x);
+  movers.flat().forEach(c => c.remove());
+  const pCells = prods.map((v, i) => cell(g, cx(i), cy("p", i), v, .6));
+  pCells.forEach(c => c.style.opacity = 0);
+  await tween(500, t => pCells.forEach(c => c.style.opacity = t));
+  const note = el("text", { x: 600, y: ROW.p + 2 * (CH + 4) + 18, "text-anchor": "middle", class: "serif", "font-size": 15,
+                            fill: MUTED, "font-style": "italic" }, g);
+  note.textContent = "same sign in both words → positive product (red) · opposite signs → negative (blue)";
+  await wait(1000);
+
+  // sum, lengths, cosine
+  const total = prods.reduce((s_, x) => s_ + x, 0), SY = 510;
+  const sumT = el("text", { x: 600, y: SY, "text-anchor": "middle", class: "mono", "font-size": 24, fill: FG }, g);
+  const flying = prods.map((v, i) => cell(g, cx(i), cy("p", i), v, .6));
+  await tween(1000, t => {
+    flying.forEach((pc, i) => { const u = smooth(clamp(t * 1.4 - i / D * .4));
+      pc.setAttribute("transform", `translate(${lerp(cx(i), 600, u)},${lerp(cy("p", i), SY - 8, u)}) scale(${1 - .7 * u})`); pc.style.opacity = 1 - u * .95; });
+    sumT.innerHTML = `dot = sum of the 50 products = ${f2(total * clamp(t * 1.2))}`;
+  }, x => x);
+  flying.forEach(pc => pc.remove());
+  sumT.innerHTML = `dot = sum of the 50 products = ${f2(total)}`;
+  const na = norm(a), nb = norm(b);
+  const normT = el("text", { x: 600, y: SY + 40, "text-anchor": "middle", class: "mono", "font-size": 18, fill: MUTED }, g);
+  normT.innerHTML = `length of <tspan fill="${YELLOW}">${wa}</tspan> = ${f2(na)}    length of <tspan fill="${BLUE}">${wb}</tspan> = ${f2(nb)}`;
+  await tween(500, t => normT.style.opacity = t);
+  const c = total / (na * nb);
+  const res = el("text", { x: 600, y: SY + 110, "text-anchor": "middle", class: "mono", "font-size": 38, "font-weight": 700, fill: FG }, g);
+  res.innerHTML = `cos = ${f2(total)} / (${f2(na)} × ${f2(nb)}) = <tspan fill="${c >= 0 ? RED : BLUE}">${f2(c)}</tspan>`;
+  await tween(600, t => res.style.opacity = t);
+  const msg = {
+    "similar": ["Similar words: most numbers agree", "the same formula in 2, 50 or 768 dimensions: a word search is just this, for every pair"],
+    "same topic": ["Same topic: the vectors point the same way", "pizza and pasta appear in the same kind of sentences"],
+    "opposite meanings": ["Opposite meanings, close vectors", "good and bad appear in the same contexts (“a good film”, “a bad film”): GloVe learned contexts, not meanings"],
+    "unrelated": ["Unrelated words: agreements and disagreements cancel out", "the products are positive and negative in equal measure: the sum stays small"],
+  }[kind];
+  if (my === runId) say(msg[0], msg[1]);
+}
+
+// ------------------------------------------------------------------ scenes
+const PLANE_HOME = { scale: 72, cx: 400, cy: 420 };
+function restorePair() { st.freeB = false; [st.a, st.b] = pairCoords(st.wa, st.wb); }
+async function scene1() {
+  restorePair();
+  await to(700, { ...PLANE_HOME, normT: 0, unitOp: 0, projOp: 0, distOp: 0, planeOp: 1, panelOp: 1, graphOp: 0, ndOp: 0, k: 1 });
+  await say("Two word vectors, one angle", "two vectors always span a plane, even in 50 dimensions: here is the plane of the two words, angle and lengths exact");
+}
+async function scene2() {
+  restorePair();
+  await to(600, { ...PLANE_HOME, k: 1, distOp: 0, graphOp: 0, ndOp: 0, planeOp: 1, panelOp: 1 });
+  await say("Only the direction counts", "divide each vector by its length: both land on the circle of radius 1");
+  await to(1400, { scale: 210, cy: 560, cx: 330, unitOp: 1 });
+  await to(1400, { normT: 1 });
+  await say("cos θ is a shadow", "on the unit circle, cos θ is the length of the shadow of one word's arrow on the other");
+  await to(700, { projOp: 1 });
+}
+async function scene3() {
+  restorePair();
+  await to(1200, { ...PLANE_HOME, normT: 0, unitOp: 0, projOp: 0, graphOp: 0, ndOp: 0, planeOp: 1, panelOp: 1 });
+  await say("Length changes the distance, not the cosine",
+            "a longer vector (a word seen more often, a review written twice) moves the distance, never the cosine");
+  await to(500, { distOp: 1 });
+  await to(1500, { k: 2.4 }); syncStretch(); await wait(400);
+  await to(1500, { k: .4 }); syncStretch(); await wait(400);
+  await to(1000, { k: 1 }); syncStretch();
+}
+async function scene4() {
+  await to(800, { ...PLANE_HOME, normT: 0, unitOp: 0, projOp: 0, distOp: 0, ndOp: 0, planeOp: 1, panelOp: 1, k: 1, graphOp: 1 });
+  syncStretch();
+  await say("From +1 to −1", "the 2nd arrow turns once around the 1st (grab its tip to turn it yourself); real GloVe words almost always stay below 90°");
+  await sweep();
+}
+async function sweep() {
+  tracePts = [];
+  st.freeB = true;
+  const nb = norm(st.b), base = ang(st.a);
+  await tween(6000, t => {
+    const phi = t * 2 * Math.PI;
+    st.b = [nb * Math.cos(base + phi), nb * Math.sin(base + phi)];
+    const deg = Math.min(359.9, t * 360);
+    tracePts.push([gx(deg), gy(Math.cos(deg * Math.PI / 180))]);
+    const d = deg;
+    const sub = d < 30 ? "θ ≈ 0°: same direction, cos = +1"
+              : d > 75 && d < 105 ? "θ = 90°: orthogonal, cos = 0, like any two different one-hot vectors"
+              : d > 165 && d < 195 ? "θ = 180°: opposite directions, cos = −1"
+              : d > 255 && d < 285 ? "θ = 270°: orthogonal again, cos = 0" : capSub.textContent;
+    capSub.textContent = sub;
+  }, x => x);
+  st.freeB = false; st.b = pairCoords(st.wa, st.wb)[1]; render();
+}
+async function scene5() {
+  await to(700, { planeOp: 0, panelOp: 0, graphOp: 0 });
+  await say("The same formula with the real 50 numbers", "two words of GloVe, number by number");
+  await playND(0);
+}
+const SCENES = [scene1, scene2, scene3, scene4, scene5];
+
+// ------------------------------------------------------------------ controls
+const chips = [...document.querySelectorAll(".chip")];
+function show(n) {
+  st.scene = n;
+  chips.forEach(c => { const k = +c.dataset.scene; c.classList.toggle("active", k === n); c.classList.toggle("done", k < n); });
+  [3, 4, 5].forEach(k => document.getElementById("extra" + k).classList.toggle("show", k === n));
+  document.getElementById("pickers").style.display = n === 5 ? "none" : "";
+}
+async function go(n) {
+  if (n < 1 || n > SCENES.length) return;
+  runId++;
+  show(n);
+  if (n !== 5) { L.nd.replaceChildren(); }
+  render();
+  try { await SCENES[n - 1](); } catch (e) { if (!(e instanceof Cancel)) throw e; }
+}
+chips.forEach(c => c.onclick = () => go(+c.dataset.scene));
+document.getElementById("next").onclick = () => go(Math.min(5, st.scene + 1));
+document.getElementById("back").onclick = () => go(Math.max(1, st.scene - 1));
+const stretch = document.getElementById("stretch"), kval = document.getElementById("kval");
+function syncStretch() { stretch.value = st.k; kval.textContent = st.k.toFixed(2); }
+stretch.oninput = () => { runId++; st.k = parseFloat(stretch.value); st.distOp = 1; kval.textContent = st.k.toFixed(2); render(); };
+document.getElementById("sweep").onclick = () => { runId++; const my = runId; sweep().catch(() => {}); };
+const sel1 = document.getElementById("w1"), sel2 = document.getElementById("w2");
+W.words.forEach((w, i) => { sel1.add(new Option(w, i)); sel2.add(new Option(w, i)); });
+sel1.value = st.wa; sel2.value = st.wb;
+function pick() {
+  const i = +sel1.value, j = +sel2.value;
+  if (i === j) { sel1.value = st.wa; sel2.value = st.wb; return; }
+  if (st.scene === 5) return;
+  setWords(i, j).catch(e => { if (!(e instanceof Cancel)) throw e; });
+}
+sel1.onchange = sel2.onchange = pick;
+W.presets.forEach(([wa, wb], k) => {
+  const btn = document.createElement("button");
+  btn.textContent = `${wa} / ${wb}`;
+  btn.onclick = () => playND(k).catch(e => { if (!(e instanceof Cancel)) throw e; });
+  document.getElementById("extra5").appendChild(btn);
+});
+
+(document.fonts ? document.fonts.ready : Promise.resolve()).then(() => { render(); go(1); });
+</script>
+</body>
+</html>

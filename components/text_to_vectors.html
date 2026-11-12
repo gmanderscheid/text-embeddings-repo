@@ -1,0 +1,610 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Source+Serif+4:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+  :root { --bg: #000000; --fg: #ECEFF4; --muted: #7D8590; --blue: #58C4DD; --yellow: #F7D96F; --red: #FC6255; }
+  html, body { margin: 0; background: transparent; font-family: "Source Serif 4", Georgia, serif; }
+  .wrap { background: var(--bg); border: 1px solid #22262E; border-radius: 14px; overflow: hidden; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 14px;
+         border-bottom: 1px solid #22262E; font-family: "JetBrains Mono", monospace; font-size: 13px; }
+  .chip { color: var(--muted); border: 1px solid #2C313A; border-radius: 999px; padding: 4px 12px;
+          cursor: pointer; user-select: none; transition: all .25s; }
+  .chip:hover { color: var(--fg); border-color: #444B57; }
+  .chip.done { color: var(--fg); }
+  .chip.active { color: var(--bg); background: var(--yellow); border-color: var(--yellow); }
+  .spacer { flex: 1; }
+  button, select { font-family: inherit; font-size: 13px; color: var(--fg); background: #1A1E25;
+                   border: 1px solid #2C313A; border-radius: 8px; padding: 5px 12px; cursor: pointer; }
+  button:hover, select:hover { border-color: var(--blue); }
+  button.primary { background: var(--blue); color: var(--bg); border-color: var(--blue); font-weight: 700; }
+  svg { display: block; width: 100%; height: auto; }
+  .mono { font-family: "JetBrains Mono", monospace; }
+  .serif { font-family: "Source Serif 4", Georgia, serif; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <span class="chip" data-stage="1">1 · text</span>
+    <span class="chip" data-stage="2">2 · tokens</span>
+    <span class="chip" data-stage="3">3 · ids</span>
+    <span class="chip" data-stage="4">4 · vectors</span>
+    <span class="spacer"></span>
+    <button id="back" title="previous step">◀</button>
+    <button id="next" class="primary" title="next step (or finish the current one)">next ▶</button>
+    <button id="auto" title="play every remaining step">auto ▶▶</button>
+    <button id="restart" title="start again">⟲</button>
+    <select id="speed" title="speed">
+      <option value="0.5">0.5×</option><option value="1" selected>1×</option>
+      <option value="1.5">1.5×</option><option value="2.5">2.5×</option>
+    </select>
+  </div>
+  <svg id="stage" viewBox="0 0 1200 720" preserveAspectRatio="xMidYMid meet"></svg>
+</div>
+
+<script>
+const D = __DATA__;
+const NS = "http://www.w3.org/2000/svg";
+const svg = document.getElementById("stage");
+const W = 1200, H = 720;
+const FG = "#ECEFF4", MUTED = "#7D8590", DIM = "#3A404B", BG = "#000000";
+const BLUE = "#58C4DD", YELLOW = "#F7D96F", RED = "#FC6255";
+// Manim-like palette for the tokens (no red: red means "positive value" / "unknown")
+const TOK_COLORS = ["#58C4DD", "#83C167", "#F7D96F", "#9A72AC", "#5CD0B3", "#F0AC5F",
+                    "#D147BD", "#29ABCA", "#A6CF8C", "#E8C11C", "#C55F73", "#B189C6", "#76DDC0", "#FFB07A"];
+
+// ------------------------------------------------------------------ helpers
+function el(tag, attrs = {}, parent = svg) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  parent.appendChild(e);
+  return e;
+}
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const smooth = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;   // ease in-out cubic
+const linear = t => t;
+const fmt = v => (v >= 0 ? " " : "") + v.toFixed(2);
+
+let speed = 1, instant = false, runId = 0;
+class Cancel extends Error {}
+
+function tween(ms, fn, easing = smooth) {
+  const my = runId;
+  if (instant) { fn(1); return Promise.resolve(); }
+  return new Promise((resolve, reject) => {
+    const t0 = performance.now(), dur = Math.max(1, ms / speed);
+    function frame(now) {
+      if (my !== runId) return reject(new Cancel());
+      const t = clamp((now - t0) / dur);
+      fn(easing(t));
+      if (t < 1) requestAnimationFrame(frame); else resolve();
+    }
+    requestAnimationFrame(frame);
+  });
+}
+const wait = ms => tween(ms, () => {});
+const both = (...ps) => Promise.all(ps);
+
+// value -> colour: blue for negative, red for positive, dark near zero (like a heat map)
+function hex2rgb(h) { return [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)); }
+const CELL0 = hex2rgb("#1E232B"), NEG = hex2rgb(BLUE), POS = hex2rgb(RED);
+function valueColor(v) {
+  const t = clamp(Math.abs(v) / 2.2), c = v < 0 ? NEG : POS;
+  const m = CELL0.map((a, i) => Math.round(lerp(a, c[i], t)));
+  return `rgb(${m[0]},${m[1]},${m[2]})`;
+}
+const valueText = v => Math.abs(v) > 1.3 ? BG : FG;
+
+// ------------------------------------------------------------------ layers
+const L = {};
+for (const name of ["caption", "text", "tokens", "ids", "panel", "vectors", "notes", "ghost"])
+  L[name] = el("g", { id: "layer-" + name });
+
+// caption: a title and a sub-line, top of the stage (3b1b style subtitles)
+const capMain = el("text", { x: 600, y: 46, "text-anchor": "middle", class: "serif", "font-size": 26,
+                             fill: FG, "font-weight": 600 }, L.caption);
+const capSub = el("text", { x: 600, y: 76, "text-anchor": "middle", class: "serif", "font-size": 17,
+                            fill: MUTED, "font-style": "italic" }, L.caption);
+
+async function say(main, sub = "") {
+  await tween(220, t => { capMain.style.opacity = 1 - t; capSub.style.opacity = 1 - t; });
+  capMain.textContent = main; capSub.textContent = sub; capSub.setAttribute("fill", MUTED);
+  await tween(380, t => { capMain.style.opacity = t; capSub.style.opacity = t; });
+}
+async function saySub(sub, color = MUTED) {
+  await tween(180, t => capSub.style.opacity = 1 - t);
+  capSub.textContent = sub; capSub.setAttribute("fill", color);
+  await tween(300, t => capSub.style.opacity = t);
+}
+
+// ------------------------------------------------------------------ geometry
+const N = D.chars.length, T = D.tokens.length, V = D.vocab.length, DIMS = D.dim, MODE = D.mode;
+
+// Rows of W: the exact ones (from PyTorch) around every looked-up id; elsewhere the table only scrolls by,
+// so a seeded N(0, 1) stand-in is drawn instead of shipping 50,257 rows to the browser.
+function rnd(seed) { const x = Math.sin(seed * 12.9898 + 78.233) * 43758.5453; return x - Math.floor(x); }
+function getRow(id) {
+  if (D.rows[id]) return D.rows[id];
+  return Array.from({ length: DIMS }, (_, j) => {
+    const u = Math.max(1e-6, rnd(id * 31 + j)), v = rnd(id * 17 + j + 0.5);
+    return Math.round(Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v) * 100) / 100;
+  });
+}
+const TEXT_Y = 250;
+const RAW_FONT = clamp(1040 / Math.max(1, N * 0.6), 14, 40);
+let CHAR_W = RAW_FONT * 0.6;                         // replaced by a measure once the font is loaded
+const TOK_Y = 140, ID_Y = 196, VEC_TOP = 228;
+
+let tokLayout = null;                                // computed in stage 2
+function computeTokenLayout() {
+  let font = 22, pad = 10, gap = 14, minW = MODE === "characters" ? 44 : 58;
+  const widths = f => D.tokens.map(t => Math.max(minW * f, Math.max(t.n, 1) * CHAR_W * (font * f / RAW_FONT) + 2 * pad * f));
+  let f = 1, ws = widths(1), total = ws.reduce((a, b) => a + b, 0) + gap * (T - 1);
+  if (total > 1140) { f = 1140 / total; ws = widths(f); total = 1140; }
+  let x = 600 - total / 2;
+  const xs = ws.map(w => { const c = x + w / 2; x += w + gap * f; return c; });
+  const spacing = T > 1 ? Math.min(...xs.slice(1).map((c, i) => c - xs[i])) : 100;
+  return { font: font * f, scale: font * f / RAW_FONT, xs, ws, charW: CHAR_W * font * f / RAW_FONT,
+           colW: Math.min(56, spacing - 22) };          // room for the brackets between columns
+}
+
+// ------------------------------------------------------------------ state
+let chars = [], toks = [], badges = [], columns = [];
+function place(s) {
+  s.el.setAttribute("transform", `translate(${s.x},${s.y}) scale(${s.sx ?? s.s ?? 1},${s.sy ?? s.s ?? 1})`);
+  s.el.style.opacity = s.op;
+}
+function clearAll() {
+  for (const k in L) if (k !== "caption") L[k].replaceChildren();
+  capMain.textContent = ""; capSub.textContent = ""; capSub.setAttribute("fill", MUTED);
+  chars = []; toks = []; badges = []; columns = [];
+}
+function fadeLayer(layer, to) {
+  const from = parseFloat(layer.style.opacity || 1);
+  return tween(400, t => layer.style.opacity = lerp(from, to, t));
+}
+
+// ================================================================== stage 1: the raw text
+async function stage1() {
+  for (const k in L) L[k].style.opacity = 1;
+  await say("A sentence, as the computer receives it", "a string of characters: nothing a network can multiply");
+  const x0 = 600 - N * CHAR_W / 2;
+  chars = D.chars.map((c, i) => {
+    const e = el("text", { class: "mono", "font-size": RAW_FONT, "text-anchor": "middle",
+                           "dominant-baseline": "central", fill: FG }, L.text);
+    e.textContent = c.c === " " ? " " : c.c;
+    const s = { ...c, i, el: e, x: x0 + (i + .5) * CHAR_W, y: TEXT_Y, sx: 1, sy: 1, op: 0 };
+    place(s); return s;
+  });
+  const per = Math.min(55, 1400 / N), fade = 260, total = per * N + fade;
+  await tween(total, t => {
+    chars.forEach((c, i) => {
+      const k = clamp((t * total - i * per) / fade);
+      c.op = k; c.y = TEXT_Y + (1 - smooth(k)) * 14; place(c);
+    });
+  }, linear);
+  const count = el("text", { x: 600, y: TEXT_Y + 60, "text-anchor": "middle", class: "mono",
+                             "font-size": 15, fill: MUTED }, L.notes);
+  count.textContent = `${N} characters`;
+  await tween(400, t => count.style.opacity = t);
+}
+
+// ================================================================== stage 2: tokenization
+const SPACE_MARK = { " ": "␣", "\n": "↵", "\t": "⇥" };
+
+async function stage2() {
+  // a) the case: lower-cased by the lecture's rule and the character rule, kept by GPT-2
+  if (MODE === "subwords") {
+    const caps = chars.filter(c => c.c !== c.c.toLowerCase());
+    if (caps.length) {
+      await say("Step 1 · GPT-2 keeps the capitals", "“The” and “the” are two different tokens, with two different ids");
+      caps.forEach(c => c.el.setAttribute("fill", YELLOW));
+      await tween(600, t => caps.forEach(c => { c.sx = c.sy = 1 + .3 * Math.sin(Math.PI * t); place(c); }));
+      await wait(500);
+      caps.forEach(c => c.el.setAttribute("fill", FG));
+    }
+  } else {
+    const upper = chars.filter(c => c.lower !== c.c);
+    if (upper.length) {
+      await say("Step 1 · lower-case everything", "“The” and “the” must become the same token");
+      await tween(700, t => {
+        for (const c of upper) {
+          if (t >= .5 && c.el.textContent !== c.lower) { c.el.textContent = c.lower; c.el.setAttribute("fill", YELLOW); }
+          c.sy = Math.abs(1 - 2 * t); place(c);
+        }
+      });
+      if (instant) upper.forEach(c => { c.sy = 1; place(c); });
+      await wait(350);
+      await tween(400, t => upper.forEach(c => c.el.setAttribute("fill", t < 1 ? YELLOW : FG)));
+    }
+  }
+
+  // b) spaces and punctuation: dropped by the lecture's rule, kept by the two others
+  L.notes.replaceChildren();
+  if (MODE === "words") {
+    const seps = chars.filter(c => c.tok < 0);
+    await say("Step 2 · cut on everything that is not a letter",
+              "spaces, punctuation and digits are separators: they are dropped");
+    for (const c of seps) {
+      if (SPACE_MARK[c.c]) c.el.textContent = SPACE_MARK[c.c];
+      c.el.setAttribute("fill", RED);
+    }
+    await wait(500);
+    const y0 = seps.map(c => c.y);
+    await tween(700, t => seps.forEach((c, k) => { c.y = y0[k] + t * 70; c.op = 1 - t; place(c); }),
+                t => t * t);
+    seps.forEach(c => c.el.remove());
+    chars = chars.filter(c => c.tok >= 0);
+  } else {
+    const spaces = chars.filter(c => SPACE_MARK[c.c]);
+    await say("Step 2 · nothing is thrown away", MODE === "subwords"
+      ? "a space is glued to the word that follows it, punctuation gets its own tokens"
+      : "spaces and punctuation are characters too: each one will be a token");
+    spaces.forEach(c => { c.el.textContent = SPACE_MARK[c.c]; c.el.setAttribute("fill", YELLOW); });
+    await tween(500, t => spaces.forEach(c => { c.op = .4 + .6 * t; place(c); }));
+    await wait(500);
+  }
+
+  // c) the pieces become tokens, each in its own box
+  tokLayout = computeTokenLayout();
+  if (MODE === "words")
+    await say(`Step 3 · each run of letters is a token: ${T} tokens`,
+              "real models cut further, into subwords: switch the tokenizer in the sidebar");
+  else if (MODE === "subwords")
+    await say(`Step 3 · BPE cuts the text into ${T} known pieces`, D.split_example
+      ? `frequent words stay whole, rare ones are cut into frequent pieces: ${D.split_example}`
+      : "frequent words stay whole, rare ones are cut into frequent pieces");
+  else
+    await say(`Step 3 · every character is a token: ${T} tokens`,
+              "a tiny vocabulary and never an unknown word, but long sequences of pieces that mean little");
+
+  const start = chars.map(c => ({ x: c.x, y: c.y }));
+  const target = chars.map(c => {
+    const n = D.tokens[c.tok].n;
+    return { x: tokLayout.xs[c.tok] - n * tokLayout.charW / 2 + (c.k + .5) * tokLayout.charW, y: TOK_Y };
+  });
+  await tween(1100, t => chars.forEach((c, k) => {
+    const lag = c.tok / Math.max(1, T) * .3, u = smooth(clamp((t - lag) / .7));
+    c.x = lerp(start[k].x, target[k].x, u); c.y = lerp(start[k].y, target[k].y, u) - Math.sin(Math.PI * u) * 30;
+    c.sx = c.sy = lerp(1, tokLayout.scale, u); place(c);
+  }), linear);
+
+  toks = D.tokens.map((tk, i) => {
+    const color = TOK_COLORS[i % TOK_COLORS.length], x = tokLayout.xs[i], w = tokLayout.ws[i];
+    const g = el("g", {}, L.tokens);
+    el("rect", { x: -w / 2, y: -21, width: w, height: 42, rx: 9, fill: color, "fill-opacity": .13,
+                 stroke: color, "stroke-width": 2 }, g);
+    const idx = el("text", { x: 0, y: -34, "text-anchor": "middle", class: "mono", "font-size": 12, fill: MUTED }, g);
+    idx.textContent = i;
+    if (tk.n === 0) {                // a byte piece of a character already drawn in the previous token
+      const lab = el("text", { "text-anchor": "middle", "dominant-baseline": "central", class: "mono",
+                               "font-size": tokLayout.font, fill: color }, g);
+      lab.textContent = tk.label;
+    }
+    const s = { ...tk, i, color, x, y: TOK_Y, w, s: .6, op: 0, el: g };
+    place(s); return s;
+  });
+  await tween(600, t => toks.forEach((s, i) => {
+    const u = smooth(clamp(t * 1.6 - i * .6 / Math.max(1, T)));
+    s.s = lerp(.6, 1, u); s.op = u; place(s);
+  }), linear);
+  chars.forEach(c => c.el.setAttribute("fill", toks[c.tok].color));
+}
+
+// ================================================================== stage 3: vocabulary lookup
+const RH = 30, ROWS = 9, PW = 380, PX0 = 410, PT = 340, PH = RH * ROWS, PYMID = PT + PH / 2;
+let panel = null;
+
+function buildVocabPanel() {
+  const g = el("g", {}, L.panel);
+  el("rect", { x: PX0, y: PT, width: PW, height: PH, rx: 12 }, el("clipPath", { id: "vclip" }, g));
+  el("rect", { x: PX0, y: PT, width: PW, height: PH, rx: 12, fill: "#151920", stroke: "#2C313A" }, g);
+  const band = el("rect", { x: PX0, y: PYMID - RH / 2, width: PW, height: RH, fill: YELLOW, "fill-opacity": 0 }, g);
+  el("line", { x1: PX0 + 104, x2: PX0 + 104, y1: PT + 8, y2: PT + PH - 8, stroke: "#2C313A" }, g);
+  const rowsG = el("g", { "clip-path": "url(#vclip)" }, g);
+  const rows = [];
+  for (let k = 0; k < ROWS + 2; k++) {
+    const r = el("g", {}, rowsG);
+    const id = el("text", { x: PX0 + 88, "text-anchor": "end", class: "mono", "font-size": 15, fill: MUTED,
+                            "dominant-baseline": "central" }, r);
+    const word = el("text", { x: PX0 + 122, class: "mono", "font-size": 16, fill: FG, "dominant-baseline": "central" }, r);
+    rows.push({ r, id, word });
+  }
+  const head = el("text", { x: 600, y: PT - 34, "text-anchor": "middle", class: "serif", "font-size": 18, fill: FG }, g);
+  head.textContent = `${MODE === "subwords" ? "GPT-2 vocabulary" : "vocabulary"} · ${V.toLocaleString("en")} entries`;
+  const sub = el("text", { x: 600, y: PT - 13, "text-anchor": "middle", class: "serif", "font-size": 14,
+                           fill: MUTED, "font-style": "italic" }, g);
+  sub.textContent = {
+    words: "words seen ≥ 15 times in 2,000 movie reviews · id 0 = <pad>, id 1 = <unk>",
+    characters: "characters seen ≥ 15 times in the same reviews · id 0 = <pad>, id 1 = <unk>",
+    subwords: "256 bytes + 50,000 merges learned by BPE on web text + <|endoftext|>",
+  }[MODE];
+  const hId = el("text", { x: PX0 + 88, y: PT + PH + 20, "text-anchor": "end", class: "mono", "font-size": 12, fill: MUTED }, g);
+  hId.textContent = "id";
+  const hW = el("text", { x: PX0 + 122, y: PT + PH + 20, class: "mono", "font-size": 12, fill: MUTED }, g);
+  hW.textContent = "token";
+  panel = { g, band, rows, pos: 2 };
+  renderVocab();
+  return panel;
+}
+function renderVocab() {
+  const base = Math.floor(panel.pos) - Math.floor(ROWS / 2) - 1;
+  panel.rows.forEach((row, k) => {
+    const id = base + k, d = id - panel.pos;
+    if (id < 0 || id >= V) { row.r.style.opacity = 0; return; }
+    row.r.setAttribute("transform", `translate(0,${PYMID + d * RH})`);
+    row.r.style.opacity = clamp(1 - Math.abs(d) / (ROWS / 2 + .6));
+    row.id.textContent = id; row.word.textContent = D.vocab[id];
+  });
+}
+function scrollTo(pos, f, setter, getter) {
+  const from = getter(), dist = Math.abs(pos - from);
+  const ms = dist < .5 ? 150 : (450 + 380 * Math.log10(1 + dist)) * f;
+  return tween(ms, t => setter(lerp(from, pos, t)));
+}
+const pace = i => i < 2 ? 1 : i < 4 ? .55 : .3;      // slow for the first tokens, then "and so on"
+
+async function stage3() {
+  await say("Step 4 · look each token up in the vocabulary",
+            "a fixed table word → id, built once from the training texts");
+  buildVocabPanel();
+  L.panel.style.opacity = 0;
+  await tween(500, t => L.panel.style.opacity = t);
+  let saidUnk = false;
+  for (const tk of toks) {
+    const f = pace(tk.i), color = tk.unk ? RED : tk.color;
+    // a copy of the token travels to the search slot of the table
+    const ghost = el("g", {}, L.ghost);
+    el("rect", { x: -tk.w / 2, y: -21, width: tk.w, height: 42, rx: 9, fill: BG, stroke: tk.color, "stroke-width": 2 }, ghost);
+    const gt = el("text", { "text-anchor": "middle", "dominant-baseline": "central", class: "mono",
+                            "font-size": tokLayout.font, fill: tk.color }, ghost);
+    gt.textContent = tk.label;
+    const gs = { x: tk.x, y: TOK_Y, s: 1, op: 1, el: ghost };
+    place(gs);
+    const gx = PX0 - 30 - tk.w / 2;
+    await both(
+      tween(650 * f, t => { gs.x = lerp(tk.x, gx, t); gs.y = lerp(TOK_Y, PYMID, t); place(gs); }),
+      scrollTo(tk.id, f, p => { panel.pos = p; renderVocab(); }, () => panel.pos),
+    );
+    panel.band.setAttribute("fill", color);
+    await tween(260 * f, t => panel.band.setAttribute("fill-opacity", .28 * t));
+    if (tk.unk && !saidUnk) {
+      saidUnk = true;
+      await saySub(`“${tk.label}” is not in the vocabulary → it becomes id 1, <unk>`, RED);
+      await wait(700);
+    }
+    // the id flies back under its token
+    const badge = el("text", { "text-anchor": "middle", "dominant-baseline": "central", class: "mono",
+                               "font-size": 20, "font-weight": 700, fill: color }, L.ids);
+    badge.textContent = tk.id;
+    const bs = { x: PX0 + 70, y: PYMID, s: 1.3, op: 1, el: badge, id: tk.id, color, tok: tk };
+    badges.push(bs);
+    await tween(700 * f, t => {
+      bs.x = lerp(PX0 + 70, tk.x, t); bs.y = lerp(PYMID, ID_Y, t) - Math.sin(Math.PI * t) * 40;
+      bs.s = lerp(1.3, 1, t); place(bs);
+      gs.op = 1 - t; place(gs);
+      panel.band.setAttribute("fill-opacity", .28 * (1 - t));
+    });
+    ghost.remove();
+  }
+  const list = el("text", { x: 600, y: PT + PH + 64, "text-anchor": "middle", class: "mono", "font-size": 19, fill: FG }, L.notes);
+  list.textContent = `ids = [${D.tokens.map(t => t.id).join(", ")}]`;
+  await tween(400, t => list.style.opacity = t);
+  await say("The sentence is now a list of integers", {
+    words: "but an id is only a name: id 42 is no closer to 43 than to 4,000",
+    characters: `only ${V} possible ids, but one per character: a sentence becomes a long list`,
+    subwords: "no <unk> ever: any text, a made-up word or an emoji, is cut into known pieces",
+  }[MODE]);
+}
+
+// ================================================================== stage 4: embedding lookup
+const MRH = 24, MROWS = 9, MT = 478, MH = MRH * MROWS, MYMID = MT + MH / 2;
+let matrix = null;
+
+function buildMatrix() {
+  const cw = DIMS > 10 ? 36 : 42, MW = cw * DIMS, MX0 = 600 - MW / 2;
+  const g = el("g", {}, L.panel);
+  const clip = el("clipPath", { id: "mclip" }, g);
+  el("rect", { x: MX0 - 70, y: MT, width: MW + 80, height: MH }, clip);
+  el("rect", { x: MX0 - 4, y: MT - 4, width: MW + 8, height: MH + 8, rx: 8, fill: "#151920", stroke: "#2C313A" }, g);
+  const rowsG = el("g", { "clip-path": "url(#mclip)" }, g);
+  const rows = [];
+  for (let k = 0; k < MROWS + 2; k++) {
+    const r = el("g", {}, rowsG);
+    const id = el("text", { x: MX0 - 14, "text-anchor": "end", class: "mono", "font-size": 13, fill: MUTED,
+                            "dominant-baseline": "central" }, r);
+    const cells = [];
+    for (let j = 0; j < DIMS; j++) {
+      const rect = el("rect", { x: MX0 + j * cw + 1, y: -MRH / 2 + 1, width: cw - 2, height: MRH - 2, rx: 3 }, r);
+      const txt = el("text", { x: MX0 + (j + .5) * cw, "text-anchor": "middle", "dominant-baseline": "central",
+                               class: "mono", "font-size": 10 }, r);
+      cells.push({ rect, txt });
+    }
+    rows.push({ r, id, cells });
+  }
+  const outline = el("rect", { x: MX0 - 6, y: MYMID - MRH / 2 - 3, width: MW + 12, height: MRH + 6, rx: 6,
+                               fill: "none", stroke: YELLOW, "stroke-width": 2.5, "stroke-opacity": 0 }, g);
+  const head = el("text", { x: 600, y: MT - 30, "text-anchor": "middle", class: "serif", "font-size": 18, fill: FG }, g);
+  head.textContent = `embedding table W · ${V.toLocaleString("en")} rows × ${DIMS} columns`;
+  const sub = el("text", { x: 600, y: MT - 11, "text-anchor": "middle", class: "mono", "font-size": 13, fill: MUTED }, g);
+  sub.textContent = `nn.Embedding(${V}, ${DIMS}${D.padding ? ", padding_idx=0" : ""}) · random for now`;
+  // colour legend
+  const lg = el("g", { transform: `translate(${MX0 + MW + 40},${MT + 20})` }, g);
+  for (let k = 0; k <= 20; k++) {
+    const v = 2.2 - k * .22;
+    el("rect", { x: 0, y: k * 8, width: 14, height: 8, fill: valueColor(v) }, lg);
+  }
+  [["+2", 4], ["0", 84], ["−2", 164]].forEach(([s, y]) => {
+    const t = el("text", { x: 22, y, class: "mono", "font-size": 11, fill: MUTED, "dominant-baseline": "central" }, lg);
+    t.textContent = s;
+  });
+  matrix = { g, rows, outline, cw, MX0, MW, pos: 2 };
+  renderMatrix();
+}
+function renderMatrix() {
+  const base = Math.floor(matrix.pos) - Math.floor(MROWS / 2) - 1;
+  matrix.rows.forEach((row, k) => {
+    const id = base + k, d = id - matrix.pos;
+    if (id < 0 || id >= V) { row.r.style.opacity = 0; return; }
+    row.r.setAttribute("transform", `translate(0,${MYMID + d * MRH})`);
+    row.r.style.opacity = clamp(1 - Math.abs(d) / (MROWS / 2 + .6));
+    row.id.textContent = id;
+    const vals = getRow(id);
+    row.cells.forEach((c, j) => {
+      const v = vals[j];
+      c.rect.setAttribute("fill", valueColor(v));
+      c.txt.setAttribute("fill", valueText(v));
+      c.txt.textContent = v.toFixed(1);
+    });
+  });
+}
+
+async function stage4() {
+  await fadeLayer(L.panel, 0);
+  L.panel.replaceChildren(); L.notes.replaceChildren(); L.panel.style.opacity = 1;
+  await say("Step 5 · each id selects one row of the embedding table",
+            "a lookup, not a computation: row number id = the vector of that token");
+  buildMatrix();
+  L.panel.style.opacity = 0;
+  await tween(500, t => L.panel.style.opacity = t);
+
+  const ch = Math.min(26, 236 / DIMS), colW = tokLayout.colW, showNum = colW >= 33 && ch >= 15;
+  for (const bs of badges) {
+    const tk = bs.tok, f = pace(tk.i);
+    // the id travels to the row labels of W while W scrolls to that row
+    const ghost = el("text", { "text-anchor": "middle", "dominant-baseline": "central", class: "mono",
+                               "font-size": 18, "font-weight": 700, fill: bs.color }, L.ghost);
+    ghost.textContent = bs.id;
+    const gs = { x: bs.x, y: bs.y, s: 1, op: 1, el: ghost };
+    const gx = matrix.MX0 - 60;
+    await both(
+      tween(600 * f, t => { gs.x = lerp(bs.x, gx, t); gs.y = lerp(ID_Y, MYMID, t); place(gs); }),
+      scrollTo(tk.id, f, p => { matrix.pos = p; renderMatrix(); }, () => matrix.pos),
+    );
+    matrix.outline.setAttribute("stroke", bs.color);
+    await tween(250 * f, t => { matrix.outline.setAttribute("stroke-opacity", t); gs.op = 1 - t; place(gs); });
+    ghost.remove();
+
+    // the row is copied, lifted and turned into a column under its token
+    const col = el("g", {}, L.vectors);
+    const cells = [];
+    for (let j = 0; j < DIMS; j++) {
+      const v = getRow(tk.id)[j];
+      const g = el("g", {}, col);
+      const rect = el("rect", { rx: 3, fill: valueColor(v) }, g);
+      const txt = el("text", { "text-anchor": "middle", "dominant-baseline": "central", class: "mono",
+                               "font-size": colW < 42 ? 10 : 11, fill: valueText(v) }, g);
+      txt.textContent = showNum ? fmt(v) : "";
+      cells.push({ g, rect, txt, v });
+    }
+    const placeCell = (c, x, y, w, h) => {
+      c.rect.setAttribute("x", x - w / 2); c.rect.setAttribute("y", y - h / 2);
+      c.rect.setAttribute("width", w); c.rect.setAttribute("height", h);
+      c.txt.setAttribute("x", x); c.txt.setAttribute("y", y);
+    };
+    const cw = matrix.cw;
+    await tween(1000 * f, t => cells.forEach((c, j) => {
+      const lag = j / DIMS * .35, u = smooth(clamp((t - lag) / .65));
+      const x = lerp(matrix.MX0 + (j + .5) * cw, tk.x, u);
+      const y = lerp(MYMID, VEC_TOP + (j + .5) * ch, u) - Math.sin(Math.PI * u) * 25;
+      placeCell(c, x, y, lerp(cw - 2, colW, u), lerp(MRH - 2, ch - 2, u));
+      c.txt.style.opacity = u > .6 || !showNum ? 1 : 0;
+    }), linear);
+    // square brackets, as in a column vector
+    const top = VEC_TOP - 3, bot = VEC_TOP + DIMS * ch + 1, xl = tk.x - colW / 2 - 6, xr = tk.x + colW / 2 + 6;
+    const br = el("path", { d: `M${xl + 6},${top} H${xl} V${bot} H${xl + 6} M${xr - 6},${top} H${xr} V${bot} H${xr - 6}`,
+                            fill: "none", stroke: tk.color, "stroke-width": 2 }, col);
+    await tween(300 * f, t => { br.style.opacity = t; matrix.outline.setAttribute("stroke-opacity", 1 - t); });
+    columns.push(col);
+  }
+
+  // the final object: a (length, dim) matrix
+  await fadeLayer(L.panel, 0);
+  L.panel.replaceChildren(); L.panel.style.opacity = 1;
+  const x1 = tokLayout.xs[0] - colW / 2 - 6, x2 = tokLayout.xs[T - 1] + colW / 2 + 6;
+  const yb = VEC_TOP + DIMS * ch + 22, xr = x2 + 22;
+  const ann = el("g", {}, L.notes);
+  el("path", { d: `M${x1},${yb - 8} V${yb} H${x2} V${yb - 8}`, fill: "none", stroke: YELLOW, "stroke-width": 2 }, ann);
+  const l1 = el("text", { x: (x1 + x2) / 2, y: yb + 26, "text-anchor": "middle", class: "mono", "font-size": 17, fill: YELLOW }, ann);
+  l1.textContent = `length = ${T} tokens`;
+  if (xr + 90 < W) {
+    el("path", { d: `M${xr - 8},${VEC_TOP - 3} H${xr} V${yb - 21} H${xr - 8}`, fill: "none", stroke: YELLOW, "stroke-width": 2 }, ann);
+    const l2 = el("text", { x: xr + 10, y: (VEC_TOP + yb - 21) / 2, class: "mono", "font-size": 17, fill: YELLOW,
+                            "dominant-baseline": "central" }, ann);
+    l2.textContent = `dim = ${DIMS}`;
+  }
+  const shape = el("text", { x: 600, y: yb + 110, "text-anchor": "middle", class: "mono", "font-size": 30, fill: FG }, ann);
+  shape.innerHTML = `(length, dim) = (<tspan fill="${YELLOW}">${T}</tspan>, <tspan fill="${YELLOW}">${DIMS}</tspan>)`;
+  const batch = el("text", { x: 600, y: yb + 150, "text-anchor": "middle", class: "serif", "font-size": 17,
+                             fill: MUTED, "font-style": "italic" }, ann);
+  batch.textContent = "stack several padded texts and you get the shape of every text model: (batch, length, dim)";
+  await tween(700, t => ann.style.opacity = t);
+  await say("The sentence is now a matrix: one vector per token",
+            "these numbers are random for now: training moves them so that useful tokens end up close");
+}
+
+// ================================================================== controls
+const STAGES = [stage1, stage2, stage3, stage4];
+let cur = 0, playing = false, auto = false;
+const chips = [...document.querySelectorAll(".chip")];
+function markChips() {
+  chips.forEach(c => {
+    const k = +c.dataset.stage;
+    c.classList.toggle("active", k === cur);
+    c.classList.toggle("done", k < cur);
+  });
+}
+
+async function play(k) {
+  if (k < 1 || k > STAGES.length) return;
+  const my = ++runId;
+  cur = k; playing = true; markChips();
+  try {
+    await STAGES[k - 1]();
+  } catch (e) {
+    if (!(e instanceof Cancel)) throw e;
+    return;
+  }
+  if (my !== runId) return;
+  playing = false;
+  if (auto && cur < STAGES.length) { await new Promise(r => setTimeout(r, 900 / speed)); if (my === runId && auto) play(cur + 1); }
+  else auto = false;
+}
+async function jump(k) {             // rebuild stages 1..k instantly
+  runId++; playing = false;
+  clearAll();
+  instant = true;
+  try { for (let s = 1; s <= k; s++) await STAGES[s - 1](); } finally { instant = false; }
+  cur = k; markChips();
+}
+
+document.getElementById("next").onclick = () => {
+  auto = false;
+  if (playing) jump(cur);            // finish the current step at once
+  else if (cur < STAGES.length) play(cur + 1);
+};
+document.getElementById("back").onclick = () => { auto = false; if (cur > 1) jump(cur - 1); };
+document.getElementById("auto").onclick = () => {
+  auto = true;
+  if (!playing) { if (cur >= STAGES.length) { jump(0).then(() => play(1)); } else play(cur + 1); }
+};
+document.getElementById("restart").onclick = () => { auto = false; jump(0).then(() => play(1)); };
+document.getElementById("speed").onchange = e => speed = parseFloat(e.target.value);
+chips.forEach(c => c.onclick = () => { auto = false; const k = +c.dataset.stage; jump(k - 1).then(() => play(k)); });
+
+// measure the real character width once the mono font is there, then start
+(document.fonts ? document.fonts.ready : Promise.resolve()).then(() => {
+  const probe = el("text", { class: "mono", "font-size": RAW_FONT }, svg);
+  probe.textContent = "MMMMMMMMMM";
+  const w = probe.getComputedTextLength() / 10;
+  if (w > 0) CHAR_W = w;
+  probe.remove();
+  if (T === 0) { say("No token in this text", "type some words (letters) in the sidebar"); return; }
+  play(1);
+});
+</script>
+</body>
+</html>

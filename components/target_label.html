@@ -1,0 +1,338 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Source+Serif+4:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+  :root { --bg: #000; --fg: #ECEFF4; --muted: #7D8590; --blue: #58C4DD; --yellow: #F7D96F; }
+  html, body { margin: 0; background: transparent; font-family: "Source Serif 4", Georgia, serif; }
+  .wrap { background: var(--bg); border: 1px solid #22262E; border-radius: 14px; overflow: hidden; }
+  .bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 12px; border-bottom: 1px solid #22262E;
+         font-family: "JetBrains Mono", monospace; font-size: 12px; color: var(--fg); }
+  .chip { color: var(--muted); border: 1px solid #2C313A; border-radius: 999px; padding: 3px 9px; cursor: pointer; user-select: none; transition: all .25s; }
+  .chip:hover { color: var(--fg); border-color: #444B57; }
+  .chip.done { color: var(--fg); }
+  .chip.active { color: #000; background: var(--yellow); border-color: var(--yellow); }
+  .spacer { flex: 1; }
+  button, select { font-family: inherit; font-size: 12px; color: var(--fg); background: #1A1E25; border: 1px solid #2C313A; border-radius: 8px; padding: 4px 10px; cursor: pointer; }
+  button:hover, select:hover { border-color: var(--blue); }
+  button.primary { background: var(--blue); color: #000; border-color: var(--blue); font-weight: 700; }
+  svg { display: block; width: 100%; height: auto; }
+  .mono { font-family: "JetBrains Mono", monospace; } .serif { font-family: "Source Serif 4", Georgia, serif; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <span class="chip" data-stage="1">1 tokenize</span><span class="chip" data-stage="2">2 ids</span>
+    <span class="chip" data-stage="3">3 pad</span><span class="chip" data-stage="4">4 table</span>
+    <span class="chip" data-stage="5">5 lookup</span><span class="chip" data-stage="6">6 average</span>
+    <span class="chip" data-stage="7">7 predict</span><span class="chip" data-stage="8">8 error</span>
+    <span class="chip" data-stage="9">9 backprop</span><span class="chip" data-stage="10">10 repeat</span>
+    <span class="chip" data-stage="11">11 inspect</span>
+    <span class="spacer"></span>
+    <button id="back">◀</button><button id="next" class="primary">next ▶</button><button id="auto">auto ▶▶</button>
+    <button id="restart">⟲</button>
+    <select id="speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2.5">2.5×</option></select>
+  </div>
+  <svg id="stage" viewBox="0 0 1200 720" preserveAspectRatio="xMidYMid meet"></svg>
+</div>
+<script>
+const D = __DATA__, E = D.examples[D.example];
+const NS = "http://www.w3.org/2000/svg", svg = document.getElementById("stage");
+const FG = "#ECEFF4", MUTED = "#7D8590", BLUE = "#58C4DD", YELLOW = "#F7D96F", RED = "#FC6255", GREEN = "#83C167", TEAL = "#0ECDD0", PINK = "#FE0162";
+const GROUP_COLORS = { positive: TEAL, negative: PINK, neutral: "#C9D1D9", topic: "#9A72AC" };
+function el(tag, a = {}, p = svg) { const e = document.createElementNS(NS, tag); for (const k in a) e.setAttribute(k, a[k]); p.appendChild(e); return e; }
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x)), lerp = (a, b, t) => a + (b - a) * t;
+const smooth = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+const fmt = n => n.toLocaleString("en");
+function hex2rgb(h) { return [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)); }
+const C0 = hex2rgb("#1E232B"), CN = hex2rgb(BLUE), CP = hex2rgb(RED);
+function vc(v, s = .2) { const t = clamp(Math.abs(v) / s), c = v < 0 ? CN : CP; const m = C0.map((a, i) => Math.round(lerp(a, c[i], t))); return `rgb(${m})`; }
+const place = (g, x, y, s = 1) => g.setAttribute("transform", `translate(${x},${y}) scale(${s})`);
+let speed = 1, instant = false, runId = 0; class Cancel extends Error {}
+function tween(ms, fn, ease = smooth) {
+  const my = runId; if (instant) { fn(1); return Promise.resolve(); }
+  return new Promise((res, rej) => { const t0 = performance.now(), dur = Math.max(1, ms / speed);
+    (function f(now) { if (my !== runId) return rej(new Cancel()); const t = clamp((now - t0) / dur); fn(ease(t)); if (t < 1) requestAnimationFrame(f); else res(); })(t0); });
+}
+const wait = ms => tween(ms, () => {}), fade = (e, a, b, ms = 400) => tween(ms, t => e.style.opacity = lerp(a, b, t));
+const L = {}; for (const n of ["cap", "a", "b", "c"]) L[n] = el("g");
+const capMain = el("text", { x: 600, y: 44, "text-anchor": "middle", class: "serif", "font-size": 25, fill: FG, "font-weight": 600 }, L.cap);
+const capSub = el("text", { x: 600, y: 74, "text-anchor": "middle", class: "serif", "font-size": 16, fill: MUTED, "font-style": "italic" }, L.cap);
+async function say(m, s = "", col = MUTED) { await tween(200, t => { capMain.style.opacity = capSub.style.opacity = 1 - t; });
+  capMain.textContent = m; capSub.textContent = s; capSub.setAttribute("fill", col); await tween(350, t => { capMain.style.opacity = capSub.style.opacity = t; }); }
+function txt(p, x, y, s, a = {}) { const t = el("text", { x, y, class: "mono", "font-size": 14, fill: FG, ...a }, p); t.textContent = s; return t; }
+function clearAll() { for (const k in L) if (k !== "cap") { L[k].replaceChildren(); L[k].style.opacity = 1; } capMain.textContent = capSub.textContent = ""; }
+const wipe = (keep = []) => tween(350, t => { for (const k of ["a", "b", "c"]) if (!keep.includes(k)) L[k].style.opacity = 1 - t; })
+  .then(() => { for (const k of ["a", "b", "c"]) if (!keep.includes(k)) { L[k].replaceChildren(); L[k].style.opacity = 1; } });
+function strip(p, x, y, vals, cw = 26, h = 22, scale = .2, stroke = "none") {
+  const g = el("g", {}, p);
+  vals.forEach((v, j) => el("rect", { x: x + j * cw, y: y - h / 2, width: cw - 3, height: h, rx: 3, fill: vc(v, scale), stroke }, g));
+  return g;
+}
+const N = E.tokens.length, Y = E.label, LBL = Y ? "positive" : "negative", LCOL = Y ? TEAL : PINK;
+const BW = Math.min(118, 1000 / N), bx = i => 600 - N * BW / 2 + (i + .5) * BW, TY = 160;
+let boxes = [];
+function tokenBoxes(y0 = TY) {
+  return E.tokens.map((t, i) => { const g = el("g", {}, L.a);
+    el("rect", { x: -BW / 2 + 5, y: -18, width: BW - 10, height: 36, rx: 8, fill: BLUE, "fill-opacity": .12, stroke: BLUE, "stroke-width": 2 }, g);
+    txt(g, 0, 5, t, { "text-anchor": "middle", fill: BLUE, "font-size": t.length > 9 ? 12 : 15 }); place(g, bx(i), y0); return g; });
+}
+
+// ================================================================== 1 · tokenize
+async function stage1() {
+  await say("1 · Tokenize the review", `a real sentence from a ${LBL} review of the corpus (nltk ships it lower-cased, punctuation spaced out)`);
+  const pieces = E.raw.split(" "), cw = 13.2, total = E.raw.length * cw, x0 = 600 - total / 2;
+  let x = x0; const items = pieces.map(p => { const it = { p, x: x + p.length * cw / 2 }; x += (p.length + 1) * cw; return it; });
+  const g = el("g", {}, L.a);
+  const ts = items.map(it => { const t = txt(g, it.x, 300, it.p, { "text-anchor": "middle", "font-size": 22 }); t.style.opacity = 0; return t; });
+  await tween(800, t => ts.forEach((e, i) => e.style.opacity = clamp(t * 2 - i / ts.length)), x => x);
+  await wait(400);
+  const isTok = it => /[a-z]/.test(it.p);
+  const drop = ts.filter((_, i) => !isTok(items[i]));
+  drop.forEach(e => e.setAttribute("fill", RED));
+  await tween(600, t => drop.forEach(e => { e.setAttribute("y", 300 + 60 * t); e.style.opacity = 1 - t; }), t => t * t);
+  const keep = ts.filter((_, i) => isTok(items[i])), kx = items.filter(isTok).map(it => it.x);
+  boxes = tokenBoxes(); boxes.forEach(b => b.style.opacity = 0);
+  await tween(800, t => { keep.forEach((e, i) => { e.setAttribute("x", lerp(kx[i], bx(i), t)); e.setAttribute("y", lerp(300, TY + 6, t)); e.style.opacity = 1 - t; });
+    boxes.forEach(b => b.style.opacity = t); });
+  g.remove();
+  const lst = txt(L.a, 600, 250, `[${E.tokens.map(t => `"${t}"`).join(", ")}]`, { "text-anchor": "middle", "font-size": 15, fill: MUTED });
+  lst.dataset.tok = 1;
+  await say("1 · Tokenize the review", "lower-case, keep runs of letters and apostrophes: punctuation is dropped");
+}
+
+// ================================================================== 2 · ids
+async function stage2() {
+  await say("2 · A vocabulary turns words into integer ids", `the ${fmt(D.V - 2)} most frequent of the ${fmt(D.distinct)} distinct words of the corpus · 0 = <pad> · 1 = <unk>`);
+  L.a.querySelectorAll("[data-tok]").forEach(t => t.remove());
+  const g = el("g", {}, L.a);
+  g.dataset.idrow = 1;
+  E.tokens.forEach((t, i) => {
+    const c = txt(g, bx(i), TY + 40, `seen ${fmt(E.counts[i])}×`, { "text-anchor": "middle", "font-size": 11, fill: MUTED });
+    const id = txt(g, bx(i), TY + 72, `${E.ids[i]}`, { "text-anchor": "middle", "font-size": 20, fill: YELLOW, "font-weight": 700 });
+    c.style.opacity = id.style.opacity = 0; c.dataset.k = id.dataset.k = i;
+  });
+  const all = [...g.children];
+  await tween(900, t => all.forEach(e => e.style.opacity = clamp(t * 2 - (+e.dataset.k) / N)), x => x);
+  const lst = txt(L.a, 600, TY + 130, `[${E.ids.join(", ")}]`, { "text-anchor": "middle", "font-size": 22, fill: YELLOW });
+  const note = txt(L.a, 600, TY + 165, "ids follow frequency: “and” is id 4, rarer words get larger ids · the notebook keeps 7,000 words (your plan: 20,000, same idea)",
+                   { "text-anchor": "middle", class: "serif", "font-size": 14, fill: MUTED, "font-style": "italic" });
+  lst.dataset.ids = 1; note.dataset.ids = 1;
+  lst.style.opacity = note.style.opacity = 0; await tween(500, t => { lst.style.opacity = note.style.opacity = t; });
+}
+
+// ================================================================== 3 · pad
+async function stage3() {
+  await say(`3 · Pad (or cut) every review to ${fmt(D.max_len)} tokens`, "a batch must be a rectangle: short reviews are filled with 0 (<pad>), long ones are cut");
+  L.a.querySelectorAll("[data-ids]").forEach(e => e.remove());
+  const g = el("g", {}, L.b), cw = 64, cells = [...E.ids, 0, 0, 0, 0, 0], x0 = 600 - (cells.length * cw + 150) / 2, y = 400;
+  cells.forEach((v, i) => { const isPad = i >= N, c = el("g", {}, g);
+    el("rect", { x: x0 + i * cw, y: y - 18, width: cw - 6, height: 36, rx: 6, fill: isPad ? "none" : YELLOW, "fill-opacity": .12,
+                 stroke: isPad ? "#4A515C" : YELLOW, "stroke-dasharray": isPad ? "4 4" : "none", "stroke-width": 1.5 }, c);
+    txt(c, x0 + i * cw + (cw - 6) / 2, y + 5, `${v}`, { "text-anchor": "middle", fill: isPad ? MUTED : YELLOW, "font-size": 14 });
+    c.style.opacity = 0; c.dataset.k = i; });
+  const more = txt(g, x0 + cells.length * cw + 6, y + 5, `… ${fmt(D.max_len - cells.length)} more 0s`, { fill: MUTED, "font-size": 14 });
+  const shp = txt(g, 600, y + 60, `one review → ${fmt(D.max_len)} ids · a batch of 32 reviews → a tensor (32, ${fmt(D.max_len)})`, { "text-anchor": "middle", "font-size": 15 });
+  const med = txt(g, 600, y + 88, "in this corpus the median review has ~600 tokens: 39% of the slots of a batch are padding (your plan: 200, same idea)",
+                  { "text-anchor": "middle", class: "serif", "font-size": 14, fill: MUTED, "font-style": "italic" });
+  more.style.opacity = shp.style.opacity = med.style.opacity = 0;
+  await tween(1000, t => [...g.children].forEach(c => { if (c.dataset.k !== undefined) c.style.opacity = clamp(t * 2 - (+c.dataset.k) / cells.length); }), x => x);
+  await tween(500, t => { more.style.opacity = shp.style.opacity = med.style.opacity = t; });
+}
+
+// ================================================================== 4 · the random table
+async function stage4() {
+  await wipe(["a"]);
+  await say(`4 · An embedding table with random values: (${fmt(D.V)}, ${D.dim})`, "row i is the vector of word i; at the start every row is noise (normal, std 0.1); row 0 (<pad>) stays at zero");
+  const rows = [["<pad>", 0, new Array(16).fill(0)], ["and", D.ids.and, D.init_rows.and], ["boring", D.ids.boring, D.init_rows.boring],
+                ["brilliant", D.ids.brilliant, D.init_rows.brilliant], ["awful", D.ids.awful, D.init_rows.awful]];
+  const g = el("g", {}, L.b), x0 = 290, y0 = 300, rh = 48;
+  el("rect", { x: x0 - 10, y: y0 - 30, width: 16 * 26 + 18, height: rows.length * rh + 14, rx: 10, fill: "none", stroke: "#2C313A" }, g);
+  txt(g, x0 + 8 * 26, y0 - 44, `16 of the ${D.dim} columns, 5 of the ${fmt(D.V)} rows`, { "text-anchor": "middle", fill: MUTED, "font-size": 12 });
+  rows.forEach(([w, id, vals], k) => { const y = y0 + k * rh, r = el("g", {}, g);
+    txt(r, x0 - 22, y + 5, `${id}`, { "text-anchor": "end", fill: MUTED, "font-size": 12 });
+    txt(r, x0 - 75, y + 5, w, { "text-anchor": "end", fill: w === "brilliant" ? TEAL : w === "awful" ? PINK : FG, "font-size": 15 });
+    strip(r, x0, y, vals, 26, 28);
+    r.style.opacity = 0; r.dataset.k = k; });
+  await tween(900, t => [...g.children].forEach(r => { if (r.dataset.k !== undefined) r.style.opacity = clamp(t * 2 - (+r.dataset.k) / rows.length); }), x => x);
+  const info = el("g", {}, g);
+  txt(info, 900, 400, "cosine(brilliant, awful)", { "text-anchor": "middle", class: "serif", "font-size": 18 });
+  txt(info, 900, 455, `${D.cos_init.toFixed(2)}`, { "text-anchor": "middle", "font-size": 42, fill: YELLOW, "font-weight": 700 });
+  txt(info, 900, 490, "random points: no relation yet", { "text-anchor": "middle", class: "serif", "font-size": 15, fill: MUTED, "font-style": "italic" });
+  info.style.opacity = 0; await fade(info, 0, 1);
+}
+
+// ================================================================== 5 · lookup
+const SX = 330, RH = Math.min(40, 300 / N), RY = i => 205 + i * RH;
+async function stage5() {
+  await wipe(["a"]);
+  const idrow = L.a.querySelector("[data-idrow]");
+  if (idrow) { await fade(idrow, 1, 0, 300); idrow.remove(); }
+  await say("5 · Look up one vector per token", `each id fetches its row: the padded review becomes a (${fmt(D.max_len)} × ${D.dim}) matrix; padding rows are zeros and are ignored`);
+  await tween(800, t => boxes.forEach((g, i) => place(g, lerp(bx(i), 170, t), lerp(TY, RY(i), t), lerp(1, .74, t))));
+  const rows = E.rows0.map((r, i) => { const s = strip(L.b, SX, RY(i), r, 30, RH - 8); s.style.opacity = 0; return s; });
+  E.ids.forEach((id, i) => txt(L.b, SX - 14, RY(i) + 5, `${id}`, { "text-anchor": "end", fill: YELLOW, "font-size": 11 }));
+  await tween(800, t => rows.forEach((s, i) => s.style.opacity = clamp(t * 2 - i / N)), x => x);
+  txt(L.b, SX + 16 * 30 + 12, RY(0) + 5, "← still random (16 of 64)", { fill: MUTED, "font-size": 12 });
+}
+
+// ================================================================== 6 · average
+const MY = () => RY(N - 1) + RH + 30;
+async function stage6() {
+  await say("6 · Average the word vectors: one vector per review", "EmbeddingBag(mode=\"mean\", padding_idx=0): the mean over the real tokens, the pads excluded");
+  const ghosts = E.rows0.map((r, i) => ({ g: strip(L.c, 0, 0, r, 30, RH - 8), i }));
+  await tween(1000, t => ghosts.forEach(({ g, i }) => { const u = smooth(clamp(t * 1.4 - i / N * .4)); place(g, SX, lerp(RY(i), MY(), u)); g.style.opacity = 1 - u * .8; }), x => x);
+  L.c.replaceChildren();
+  strip(L.b, SX, MY(), E.mean0, 30, 24, .2, YELLOW);
+  txt(L.b, SX - 14, MY() + 7, "x̄", { "text-anchor": "end", fill: YELLOW, "font-size": 22, class: "serif" });
+}
+
+// ================================================================== 7 · predict
+async function stage7() {
+  await say("7 · Predict: one linear layer, one logit, a sigmoid", "Linear(64, 1): logit = w · x̄ + b, then p(positive) = sigmoid(logit)");
+  const wy = MY() + 40;
+  strip(L.b, SX, wy, D.w0, 30, 24, .2, GREEN);
+  txt(L.b, SX - 14, wy + 7, "w", { "text-anchor": "end", fill: GREEN, "font-size": 22, class: "serif" });
+  const lt = txt(L.b, SX, wy + 44, "", { "font-size": 16 });
+  await tween(700, t => lt.textContent = `logit = w · x̄ + b = ${(E.logit0 * t).toFixed(3)}`);
+  const G = { x0: 870, x1: 1160, y0: 200, y1: 380 }, gx = z => lerp(G.x0, G.x1, (clamp(z, -6, 6) + 6) / 12), gy = p => lerp(G.y1, G.y0, p);
+  const g = el("g", {}, L.b);
+  el("rect", { x: G.x0, y: G.y0, width: G.x1 - G.x0, height: G.y1 - G.y0, fill: "#07090D", stroke: "#22262E" }, g);
+  let d = ""; for (let z = -6; z <= 6; z += .2) d += (z === -6 ? "M" : "L") + gx(z) + "," + gy(1 / (1 + Math.exp(-z)));
+  el("path", { d, stroke: "#3A4552", "stroke-width": 2.5, fill: "none" }, g);
+  el("line", { x1: G.x0, x2: G.x1, y1: gy(.5), y2: gy(.5), stroke: "#22262E", "stroke-dasharray": "4 4" }, g);
+  txt(g, G.x0, G.y0 - 10, "p = sigmoid(logit)", { class: "serif", "font-size": 15 });
+  const dot = el("circle", { r: 8, fill: YELLOW }, g), pt = txt(g, G.x0, G.y1 + 28, "", { "font-size": 16, fill: YELLOW });
+  await tween(900, t => { const z = E.logit0 * t, p = 1 / (1 + Math.exp(-z)); dot.setAttribute("cx", gx(z)); dot.setAttribute("cy", gy(p)); pt.textContent = `p(positive) = ${(p * 100).toFixed(1)}%`; });
+  await say("7 · The random model: a coin flip", `p(positive) = ${(E.p0 * 100).toFixed(1)}% · after training, the same sentence gets ${(E.p1 * 100).toFixed(1)}%`);
+}
+
+// ================================================================== 8 · error
+async function stage8() {
+  const p = E.p0, loss = -(Y * Math.log(p) + (1 - Y) * Math.log(1 - p));
+  await say(`8 · Measure the error: true label ${Y} (${LBL}), predicted ${(p * 100).toFixed(1)}% positive`, "binary cross-entropy: −[y log p + (1 − y) log(1 − p)]");
+  const G = { x0: 870, x1: 1160, y0: 470, y1: 640 }, gx = q => lerp(G.x0, G.x1, q), lmax = 4.6, gy = l => lerp(G.y1, G.y0, clamp(l / lmax));
+  const g = el("g", {}, L.c);
+  el("rect", { x: G.x0, y: G.y0, width: G.x1 - G.x0, height: G.y1 - G.y0, fill: "#07090D", stroke: "#22262E" }, g);
+  let d = ""; for (let q = .005; q <= .995; q += .01) d += (q < .01 ? "M" : "L") + gx(q) + "," + gy(Y ? -Math.log(q) : -Math.log(1 - q));
+  el("path", { d, stroke: RED, "stroke-width": 2.5, fill: "none" }, g);
+  txt(g, G.x0, G.y0 - 8, `loss when the truth is “${LBL}”, against p`, { class: "serif", "font-size": 14 });
+  txt(g, G.x0, G.y1 + 16, "p = 0", { fill: MUTED, "font-size": 11 }); txt(g, G.x1, G.y1 + 16, "1", { fill: MUTED, "font-size": 11, "text-anchor": "end" });
+  txt(g, Y ? G.x0 + 8 : G.x1 - 8, G.y0 + 18, "confident and wrong:", { "text-anchor": Y ? "start" : "end", fill: RED, "font-size": 11 });
+  txt(g, Y ? G.x0 + 8 : G.x1 - 8, G.y0 + 32, "a huge loss", { "text-anchor": Y ? "start" : "end", fill: RED, "font-size": 11 });
+  el("circle", { cx: gx(p), cy: gy(loss), r: 7, fill: YELLOW }, g);
+  txt(g, gx(p), gy(loss) - 12, `loss = ${loss.toFixed(3)}`, { "text-anchor": "middle", fill: YELLOW, "font-size": 13 });
+  g.style.opacity = 0; await fade(g, 0, 1, 600);
+}
+
+// ================================================================== 9 · backprop
+async function stage9() {
+  const p = E.p0, dl = p - Y;
+  await say("9 · Backpropagate into the word rows", `∂L/∂logit = p − y = ${dl.toFixed(3)} · every row of the review gets the same push: −lr · (p − y) · w / ${N}`);
+  const xr = SX + 16 * 30 + 6;
+  const pulse = (x1, y1, x2, y2) => { const l = el("line", { x1, y1, x2: x1, y2: y1, stroke: LCOL, "stroke-width": 3, "stroke-linecap": "round" }, L.c);
+    return tween(450, t => { l.setAttribute("x2", lerp(x1, x2, t)); l.setAttribute("y2", lerp(y1, y2, t)); }); };
+  await pulse(865, 560, xr, MY());
+  await Promise.all(E.tokens.map((_, i) => pulse(xr, MY(), xr, RY(i))));
+  await say("9 · One review pushes all its words the same way", Y ? "a positive review: every one of its words moves a little towards +w (positive)"
+    : `a negative review, predicted positive: every word moves towards −w, “${E.tokens.includes("boring") ? "boring" : E.tokens[N - 1]}” and “${E.tokens.includes("and") ? "and" : E.tokens[0]}” alike`, LCOL);
+  await wait(1500);
+  // the first epoch, word by word: the push of every training review
+  await wipe();
+  await say("9 · Over 1,600 training reviews, neutral words cancel out", "each tick = one training review containing the word: up = positive review (push +), down = negative (push −)");
+  const words = Object.keys(D.tally), T = D.tally, ax0 = 300, ax1 = 1040, mid = (ax0 + ax1) / 2;
+  let maxc = .5; words.forEach(w => { let s = 0; T[w].contrib.forEach(c => { s += c; maxc = Math.max(maxc, Math.abs(s)); }); });
+  const sx = v => mid + v / (maxc * 1.15) * (ax1 - ax0) / 2;
+  txt(L.a, ax0, 140, "← total push towards negative", { fill: PINK, "font-size": 12 });
+  txt(L.a, ax1, 140, "total push towards positive →", { fill: TEAL, "font-size": 12, "text-anchor": "end" });
+  const lanes = words.map((w, k) => { const y = 210 + k * 125, g = el("g", {}, L.a);
+    el("line", { x1: ax0, x2: ax1, y1: y, y2: y, stroke: "#2A3038", "stroke-width": 2 }, g);
+    el("line", { x1: mid, x2: mid, y1: y - 40, y2: y + 40, stroke: "#3A4552" }, g);
+    txt(g, ax0 - 24, y + 2, w, { "text-anchor": "end", fill: YELLOW, "font-size": 18, "font-weight": 700 });
+    txt(g, ax0 - 24, y + 22, `${fmt(T[w].n)} reviews, ${Math.round(T[w].pos / T[w].n * 100)}% positive`, { "text-anchor": "end", fill: MUTED, "font-size": 11 });
+    const tick = el("g", {}, g), dot = el("circle", { cx: mid, cy: y, r: 9, fill: FG }, g);
+    const val = txt(g, ax1 + 14, y + 5, "", { fill: FG, "font-size": 14 });
+    return { w, y, tick, dot, val, shown: 0, pos: 0, neg: 0 }; });
+  await tween(4500, t => lanes.forEach(l => {
+    const c = T[l.w].contrib, n = Math.floor(t * c.length);
+    for (let j = l.shown; j < n; j++) {        // a tick per review, stacked like a histogram on each side of the axis
+      const up = T[l.w].labels[j] === 1, k = up ? l.pos++ : l.neg++, col = Math.floor(k / 12), row = k % 12;
+      const x = mid + (up ? 1 : -1) * (4 + col * 3);
+      el("line", { x1: x, x2: x, y1: l.y + (up ? -6 - row * 2.6 : 6 + row * 2.6), y2: l.y + (up ? -8 - row * 2.6 : 8 + row * 2.6),
+                   stroke: up ? TEAL : PINK, "stroke-width": 2, opacity: .7 }, l.tick);
+    }
+    l.shown = n;
+    let s = 0; for (let j = 0; j < n; j++) s += c[j];
+    l.dot.setAttribute("cx", sx(s)); l.val.textContent = (s >= 0 ? "+" : "") + s.toFixed(1);
+  }), x => x);
+  await say("9 · “and” is in almost every review: its pushes cancel out", "boring and waste sit mostly in negative reviews, brilliant in positive ones: their pushes add up");
+}
+
+// ================================================================== 10 · repeat
+async function stage10() {
+  await wipe();
+  await say("10 · Repeat over many batches: a sentiment direction emerges", "the notebook's real training run, epoch by epoch (best validation: epoch 4)");
+  const M = D.map, P = { x0: 120, x1: 1050, y0: 140, y1: 660 };
+  const px = v => lerp(P.x0, P.x1, (v + 1.15) / 2.3), py = v => lerp(P.y1, P.y0, (v + 1.15) / 2.3);
+  const g = el("g", {}, L.a);
+  el("line", { x1: P.x0, x2: P.x1, y1: py(0), y2: py(0), stroke: "#22262E" }, g);
+  el("line", { x1: px(0), x2: px(0), y1: P.y0, y2: P.y1, stroke: "#22262E" }, g);
+  txt(g, P.x1, P.y1 + 22, "horizontal: the direction w of the classifier · vertical: the next direction (rescaled)", { "text-anchor": "end", fill: MUTED, "font-size": 12 });
+  const ep = txt(g, P.x0, P.y0 - 6, "", { "font-size": 16, fill: YELLOW });
+  Object.entries(GROUP_COLORS).forEach(([k, c], i) => { el("circle", { cx: 1090, cy: 170 + i * 24, r: 6, fill: c }, g); txt(g, 1102, 175 + i * 24, k, { "font-size": 12, fill: MUTED }); });
+  const pts = M.words.map((w, i) => { const gg = el("g", {}, g), c = GROUP_COLORS[M.groups[i]];
+    el("circle", { r: 6, fill: c }, gg); txt(gg, 9, 4, w, { "font-size": 12, fill: c }); return gg; });
+  const S = M.pts.length - 1;
+  await tween(6000, t => { const f = t * S, k = Math.min(S - 1, Math.floor(f)), u = f - k;
+    pts.forEach((gg, i) => { const a = M.pts[k][i], b = M.pts[k + 1][i]; place(gg, px(lerp(a[0], b[0], u)), py(lerp(a[1], b[1], u))); });
+    ep.textContent = `epoch ${(M.epochs[k] + u * (M.epochs[k + 1] - M.epochs[k])).toFixed(2)}`; }, x => x);
+  await say("10 · Positive words on one side, negative on the other", "function words (the, and, of) stay near the middle, and so do topic words: the label never needed them");
+}
+
+// ================================================================== 11 · inspect
+async function stage11() {
+  await wipe();
+  await say("11 · Inspect: PCA of the 2,629 frequent words of the table", `the first principal component IS the sentiment direction · cosine(brilliant, awful): ${D.cos_init.toFixed(2)} → ${D.cos_final.toFixed(2)}`);
+  const P = D.pca, X0 = 80, X1 = 760, Y0 = 130, Y1 = 680, cx = v => lerp(X0, X1, (v + 1) / 2), cy = v => lerp(Y1, Y0, (v + 1) / 2);
+  const g = el("g", {}, L.a), smax = Math.max(...P.score.map(Math.abs)) * .5;
+  el("line", { x1: X0, x2: X1, y1: cy(0), y2: cy(0), stroke: "#22262E" }, g);
+  el("line", { x1: cx(0), x2: cx(0), y1: Y0, y2: Y1, stroke: "#22262E" }, g);
+  const dots = P.words.map((w, i) => el("circle", { cx: cx(0), cy: cy(0), r: 2.6, fill: P.score[i] >= 0 ? TEAL : PINK,
+                                                   "fill-opacity": .2 + .8 * clamp(Math.abs(P.score[i]) / smax) }, g));
+  await tween(1500, t => dots.forEach((d, i) => { d.setAttribute("cx", cx(P.xy[i][0] * t)); d.setAttribute("cy", cy(P.xy[i][1] * t)); }));
+  ["brilliant", "masterpiece", "excellent", "boring", "waste", "awful", "worst", "and", "the", "director", "alien"].forEach(w => {
+    const i = P.words.indexOf(w); if (i < 0) return;
+    el("circle", { cx: cx(P.xy[i][0]), cy: cy(P.xy[i][1]), r: 5, fill: "none", stroke: YELLOW, "stroke-width": 1.5 }, g);
+    txt(g, cx(P.xy[i][0]) + 8, cy(P.xy[i][1]) - 6, w, { fill: YELLOW, "font-size": 12 }); });
+  txt(g, X1, Y1 + 22, `PC1 → (${Math.round(P.var[0] * 100)}% of the variance) · PC2 ↑ stretched ×${P.stretch} (${(P.var[1] * 100).toFixed(1)}%) · colour: row · w`, { "text-anchor": "end", fill: MUTED, "font-size": 11 });
+  const nb = el("g", {}, L.b), NX = 830;
+  txt(nb, NX, 150, "nearest neighbours (cosine)", { class: "serif", "font-size": 16 });
+  Object.entries(D.neighbours).forEach(([w, list], k) => { const y = 192 + k * 128;
+    txt(nb, NX, y, w, { fill: YELLOW, "font-size": 16, "font-weight": 700 });
+    list.slice(0, 5).forEach(([n, c], j) => txt(nb, NX + 20, y + 22 + j * 19, `${n}  ${c.toFixed(2)}`, { fill: FG, "font-size": 13 })); });
+  nb.style.opacity = 0; await fade(nb, 0, 1, 500);
+  await say("11 · Close means: same effect on the label", "excellent for sentiment, useless for topics: “and” ends among positive words, “director” among negative ones");
+}
+
+// ================================================================== controls
+const STAGES = [stage1, stage2, stage3, stage4, stage5, stage6, stage7, stage8, stage9, stage10, stage11];
+let cur = 0, playing = false, auto = false;
+const chips = [...document.querySelectorAll(".chip")];
+const mark = () => chips.forEach(c => { const k = +c.dataset.stage; c.classList.toggle("active", k === cur); c.classList.toggle("done", k < cur); });
+async function play(k) { if (k < 1 || k > STAGES.length) return; const my = ++runId; cur = k; playing = true; mark();
+  try { await STAGES[k - 1](); } catch (e) { if (!(e instanceof Cancel)) throw e; return; }
+  if (my !== runId) return; playing = false;
+  if (auto && cur < STAGES.length) { await new Promise(r => setTimeout(r, 900 / speed)); if (my === runId && auto) play(cur + 1); } else auto = false; }
+async function jump(k) { runId++; playing = false; clearAll(); instant = true; try { for (let s = 1; s <= k; s++) await STAGES[s - 1](); } finally { instant = false; } cur = k; mark(); }
+document.getElementById("next").onclick = () => { auto = false; if (playing) jump(cur); else if (cur < STAGES.length) play(cur + 1); };
+document.getElementById("back").onclick = () => { auto = false; if (cur > 1) jump(cur - 1); };
+document.getElementById("auto").onclick = () => { auto = true; if (!playing) { if (cur >= STAGES.length) jump(0).then(() => play(1)); else play(cur + 1); } };
+document.getElementById("restart").onclick = () => { auto = false; jump(0).then(() => play(1)); };
+document.getElementById("speed").onchange = e => speed = parseFloat(e.target.value);
+chips.forEach(c => c.onclick = () => { auto = false; const k = +c.dataset.stage; jump(k - 1).then(() => play(k)); });
+(document.fonts ? document.fonts.ready : Promise.resolve()).then(() => play(1));
+</script>
+</body>
+</html>

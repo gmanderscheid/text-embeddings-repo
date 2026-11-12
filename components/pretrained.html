@@ -1,0 +1,296 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Source+Serif+4:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+  :root { --bg: #000; --fg: #ECEFF4; --muted: #7D8590; --blue: #58C4DD; --yellow: #F7D96F; }
+  html, body { margin: 0; background: transparent; font-family: "Source Serif 4", Georgia, serif; }
+  .wrap { background: var(--bg); border: 1px solid #22262E; border-radius: 14px; overflow: hidden; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 14px; border-bottom: 1px solid #22262E;
+         font-family: "JetBrains Mono", monospace; font-size: 13px; color: var(--fg); }
+  .chip { color: var(--muted); border: 1px solid #2C313A; border-radius: 999px; padding: 4px 12px; cursor: pointer; user-select: none; transition: all .25s; }
+  .chip:hover { color: var(--fg); border-color: #444B57; }
+  .chip.done { color: var(--fg); }
+  .chip.active { color: #000; background: var(--yellow); border-color: var(--yellow); }
+  .spacer { flex: 1; }
+  button, select { font-family: inherit; font-size: 13px; color: var(--fg); background: #1A1E25; border: 1px solid #2C313A; border-radius: 8px; padding: 5px 12px; cursor: pointer; }
+  button:hover, select:hover { border-color: var(--blue); }
+  button.primary { background: var(--blue); color: #000; border-color: var(--blue); font-weight: 700; }
+  svg { display: block; width: 100%; height: auto; }
+  .mono { font-family: "JetBrains Mono", monospace; } .serif { font-family: "Source Serif 4", Georgia, serif; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <span class="chip" data-stage="1">1 · neighbours</span>
+    <span class="chip" data-stage="2">2 · directions</span>
+    <span class="chip" data-stage="3">3 · arithmetic</span>
+    <span class="chip" data-stage="4">4 · one vector per word</span>
+    <span class="chip" data-stage="5">5 · contextual</span>
+    <span class="chip" data-stage="6">6 · search</span>
+    <span class="spacer"></span>
+    <button id="back">◀</button><button id="next" class="primary">next ▶</button><button id="auto">auto ▶▶</button>
+    <button id="restart">⟲</button>
+    <select id="speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2.5">2.5×</option></select>
+  </div>
+  <svg id="stage" viewBox="0 0 1200 720" preserveAspectRatio="xMidYMid meet"></svg>
+</div>
+<script>
+const D = __DATA__;
+const NS = "http://www.w3.org/2000/svg", svg = document.getElementById("stage");
+const FG = "#ECEFF4", MUTED = "#7D8590", BLUE = "#58C4DD", YELLOW = "#F7D96F", RED = "#FC6255", GREEN = "#83C167", PINK = "#FE0162", TEAL = "#0ECDD0", PURPLE = "#9A72AC";
+function el(tag, a = {}, p = svg) { const e = document.createElementNS(NS, tag); for (const k in a) e.setAttribute(k, a[k]); p.appendChild(e); return e; }
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x)), lerp = (a, b, t) => a + (b - a) * t;
+const smooth = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+function hex2rgb(h) { return [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)); }
+const C0 = hex2rgb("#1E232B"), CN = hex2rgb(BLUE), CP = hex2rgb(RED);
+function vc(v, s = 1) { const t = clamp(Math.abs(v) / s), c = v < 0 ? CN : CP; const m = C0.map((a, i) => Math.round(lerp(a, c[i], t))); return `rgb(${m})`; }
+let speed = 1, instant = false, runId = 0; class Cancel extends Error {}
+function tween(ms, fn, ease = smooth) {
+  const my = runId; if (instant) { fn(1); return Promise.resolve(); }
+  return new Promise((res, rej) => { const t0 = performance.now(), dur = Math.max(1, ms / speed);
+    (function f(now) { if (my !== runId) return rej(new Cancel()); const t = clamp((now - t0) / dur); fn(ease(t)); if (t < 1) requestAnimationFrame(f); else res(); })(t0); });
+}
+const wait = ms => tween(ms, () => {}), fade = (e, a, b, ms = 400) => tween(ms, t => e.style.opacity = lerp(a, b, t));
+const L = {}; for (const n of ["cap", "a", "b", "c"]) L[n] = el("g");
+const defs = el("defs");
+for (const [id, col] of [["tipB", BLUE], ["tipY", YELLOW], ["tipG", GREEN], ["tipP", PINK]]) {
+  const m = el("marker", { id, viewBox: "0 0 10 10", refX: 8, refY: 5, markerWidth: 6, markerHeight: 6, orient: "auto" }, defs);
+  el("path", { d: "M0,0 L10,5 L0,10 z", fill: col }, m);
+}
+const capMain = el("text", { x: 600, y: 46, "text-anchor": "middle", class: "serif", "font-size": 26, fill: FG, "font-weight": 600 }, L.cap);
+const capSub = el("text", { x: 600, y: 76, "text-anchor": "middle", class: "serif", "font-size": 17, fill: MUTED, "font-style": "italic" }, L.cap);
+async function say(m, s = "", col = MUTED) { await tween(200, t => { capMain.style.opacity = capSub.style.opacity = 1 - t; });
+  capMain.textContent = m; capSub.textContent = s; capSub.setAttribute("fill", col); await tween(350, t => { capMain.style.opacity = capSub.style.opacity = t; }); }
+function txt(p, x, y, s, a = {}) { const t = el("text", { x, y, class: "mono", "font-size": 14, fill: FG, ...a }, p); t.textContent = s; return t; }
+function clearAll() { for (const k in L) if (k !== "cap") { L[k].replaceChildren(); L[k].style.opacity = 1; } capMain.textContent = capSub.textContent = ""; }
+function wipe() { return tween(400, t => { L.a.style.opacity = L.b.style.opacity = L.c.style.opacity = 1 - t; })
+  .then(() => { for (const k of ["a", "b", "c"]) { L[k].replaceChildren(); L[k].style.opacity = 1; } }); }
+function arrow(p, x1, y1, x2, y2, col, tip, w = 2.5) { return el("line", { x1, y1, x2, y2, stroke: col, "stroke-width": w, "marker-end": `url(#${tip})` }, p); }
+
+// ================================================================== 1 · neighbours in GloVe
+async function stage1() {
+  await say("Word vectors trained on 6 billion words", "GloVe: 400,000 words × 50 numbers, learned from Wikipedia and the news, reused as they are");
+  const centers = [[250, 420], [610, 420], [970, 420]], words = Object.keys(D.stars);
+  const notes = { alien: "clean, even for rare film words", director: "a company director: the way Wikipedia uses it", boring: "funny is close: used in the same places" };
+  for (let k = 0; k < words.length; k++) {
+    const w = words[k], [cx, cy] = centers[k], g = el("g", {}, L.a);
+    el("circle", { cx, cy, r: 34, fill: YELLOW, "fill-opacity": .15, stroke: YELLOW, "stroke-width": 2 }, g);
+    txt(g, cx, cy + 5, w, { "text-anchor": "middle", fill: YELLOW, "font-size": 15, "font-weight": 700 });
+    const nb = D.stars[w].map(([n, c], j) => {
+      const a = -Math.PI / 2 + j * 2 * Math.PI / 6, r = 70 + (1 - c) * 360;
+      const gg = el("g", {}, g);
+      const ln = el("line", { x1: cx, y1: cy, x2: cx, y2: cy, stroke: "#3A4552", "stroke-width": 1.5 }, gg);
+      const t = txt(gg, cx, cy, n, { "text-anchor": "middle", fill: FG, "font-size": 13 });
+      const ct = txt(gg, cx, cy, c.toFixed(2), { "text-anchor": "middle", fill: MUTED, "font-size": 10 });
+      return { a, r, ln, t, ct };
+    });
+    const note = txt(g, cx, cy + 210, notes[w] || "", { "text-anchor": "middle", class: "serif", "font-size": 14, fill: MUTED, "font-style": "italic" });
+    note.style.opacity = 0;
+    await tween(900, t => nb.forEach(n => { const x = cx + n.r * t * Math.cos(n.a), y = cy + n.r * t * Math.sin(n.a);
+      n.ln.setAttribute("x2", cx + (n.r - 18) * t * Math.cos(n.a)); n.ln.setAttribute("y2", cy + (n.r - 18) * t * Math.sin(n.a));
+      n.t.setAttribute("x", x); n.t.setAttribute("y", y + 4); n.ct.setAttribute("x", x); n.ct.setAttribute("y", y + 17); }));
+    await fade(note, 0, 1, 300);
+  }
+  await say("Pretrained embeddings: transfer learning for text", "4,600 times more text than our word2vec: clean neighbours, but the meanings of Wikipedia, not of film critics");
+}
+
+// ================================================================== 2 · "capital of" is a direction
+async function stage2() {
+  await wipe();
+  await say("“Capital of” is a direction", "8 countries and their capitals: the 50 numbers projected on the 2 directions that vary the most");
+  const W = D.capitals.words, P = D.capitals.xy, cx = 450, cy = 420, s = 250;
+  const X = i => cx + P[i][0] * s, Y = i => cy - P[i][1] * s;
+  const g = el("g", {}, L.a);
+  const pts = W.map((w, i) => { const cap = i % 2 === 1, gg = el("g", {}, g);
+    el("circle", { cx: X(i), cy: Y(i), r: 6, fill: cap ? PINK : BLUE }, gg);
+    txt(gg, X(i), Y(i) + (cap ? -12 : 22), w, { "text-anchor": "middle", fill: cap ? PINK : BLUE, "font-size": 13 });
+    gg.style.opacity = 0; return gg; });
+  await tween(700, t => pts.forEach((p, i) => p.style.opacity = clamp(t * 2 - i / W.length)), x => x);
+  const arrows = [];
+  for (let k = 0; k < W.length / 2; k++) {
+    const i = 2 * k, j = 2 * k + 1, ln = arrow(g, X(i), Y(i), X(i), Y(i), YELLOW, "tipY", 2);
+    arrows.push({ ln, dx: X(j) - X(i), dy: Y(j) - Y(i), x0: X(i), y0: Y(i) });
+    await tween(350, t => { ln.setAttribute("x2", X(i) + (X(j) - X(i)) * t * .9); ln.setAttribute("y2", Y(i) + (Y(j) - Y(i)) * t * .9); });
+  }
+  await say("Move every arrow to the same starting point…", "nobody told the model what a capital is: the direction emerged from co-occurrence counts");
+  const ox = 960, oy = 470;
+  const copies = arrows.map(a => ({ ...a, ln: arrow(g, a.x0, a.y0, a.x0 + a.dx * .9, a.y0 + a.dy * .9, YELLOW, "tipY", 2) }));
+  await tween(1400, t => copies.forEach(a => { const x = lerp(a.x0, ox, t), y = lerp(a.y0, oy, t);
+    a.ln.setAttribute("x1", x); a.ln.setAttribute("y1", y); a.ln.setAttribute("x2", x + a.dx * .9); a.ln.setAttribute("y2", y + a.dy * .9); }));
+  txt(g, ox, oy + 40, "the 8 arrows, side by side: roughly the same direction", { "text-anchor": "middle", class: "serif", "font-size": 14, fill: MUTED, "font-style": "italic" });
+}
+
+// ================================================================== 3 · king - man + woman
+async function stage3() {
+  await wipe();
+  const A = D.analogy, P = A.xy, cx = 520, cy = 420, s = 260;
+  await say(`${A.a} − ${A.c} + ${A.b} = ?`, "vector arithmetic on learned vectors (most_similar excludes the input words)");
+  const X = v => cx + v[0] * s, Y = v => cy - v[1] * s;
+  const g = el("g", {}, L.a);
+  const roles = { [A.a]: YELLOW, [A.c]: BLUE, [A.b]: PINK };
+  A.words.forEach((w, i) => { const col = roles[w] || MUTED, gg = el("g", {}, g);
+    el("circle", { cx: X(P[i]), cy: Y(P[i]), r: i < 3 ? 7 : 5, fill: col }, gg);
+    txt(gg, X(P[i]) + 10, Y(P[i]) - 8, w, { fill: col, "font-size": i < 3 ? 15 : 13 }); });
+  const ic = A.words.indexOf(A.c), ib = A.words.indexOf(A.b), ia = A.words.indexOf(A.a);
+  // the direction c -> b (e.g. man -> woman)
+  const d = [P[ib][0] - P[ic][0], P[ib][1] - P[ic][1]];
+  const l1 = arrow(g, X(P[ic]), Y(P[ic]), X(P[ic]), Y(P[ic]), PINK, "tipP", 3);
+  await tween(900, t => { l1.setAttribute("x2", X([P[ic][0] + d[0] * t, P[ic][1] + d[1] * t])); l1.setAttribute("y2", Y([P[ic][0] + d[0] * t, P[ic][1] + d[1] * t])); });
+  const lab = txt(g, (X(P[ic]) + X(P[ib])) / 2 + 10, (Y(P[ic]) + Y(P[ib])) / 2 + 20, `− ${A.c} + ${A.b}`, { fill: PINK, "font-size": 14 });
+  await wait(400);
+  await say(`Apply the same arrow to “${A.a}”`, `${A.a} − ${A.c} + ${A.b}: start from ${A.a}, add the direction ${A.c} → ${A.b}`);
+  const l2 = arrow(g, X(P[ic]), Y(P[ic]), X(P[ib]), Y(P[ib]), YELLOW, "tipY", 3);
+  await tween(1200, t => { const sx = lerp(P[ic][0], P[ia][0], t), sy = lerp(P[ic][1], P[ia][1], t);
+    l2.setAttribute("x1", X([sx, sy])); l2.setAttribute("y1", Y([sx, sy])); l2.setAttribute("x2", X([sx + d[0], sy + d[1]])); l2.setAttribute("y2", Y([sx + d[0], sy + d[1]])); });
+  const T = A.target, ring = el("circle", { cx: X(T), cy: Y(T), r: 0, fill: "none", stroke: YELLOW, "stroke-width": 2, "stroke-dasharray": "4 4" }, g);
+  await tween(500, t => ring.setAttribute("r", 30 * t));
+  const box = el("g", {}, g);
+  txt(box, 900, 220, "closest words (cosine in 50 dims):", { class: "serif", "font-size": 15, fill: FG });
+  A.best.forEach(([w, c], k) => txt(box, 900, 255 + k * 30, `${k + 1}. ${w}  ${c.toFixed(2)}`, { fill: k === 0 ? YELLOW : FG, "font-size": 16, "font-weight": k === 0 ? 700 : 400 }));
+  txt(box, 900, 370, "works on famous relations (capitals, gender,", { class: "serif", "font-size": 13, fill: MUTED, "font-style": "italic" });
+  txt(box, 900, 390, "tenses); embeddings also absorb the biases", { class: "serif", "font-size": 13, fill: MUTED, "font-style": "italic" });
+  txt(box, 900, 410, "of their training text", { class: "serif", "font-size": 13, fill: MUTED, "font-style": "italic" });
+  box.style.opacity = 0; await fade(box, 0, 1, 500);
+}
+
+// ================================================================== 4-5 · bank: static vs contextual
+const B = D.bank, SY = i => 175 + i * 165, CW = 26, SX = 150;
+const occ = i => `${B.word}${"₁₂₃₄₅₆"[i]}`;          // the occurrence of the word in sentence i
+let rowsG = [], tokPos = [];
+function sentenceRow(i) {
+  const g = el("g", {}, L.a);
+  const words = B.sentences[i].replace(/([.,])/g, " $1").split(/\s+/).filter(Boolean).map(w => w.toLowerCase());
+  let x = SX; const pos = [];
+  txt(g, SX - 20, SY(i) - 4, B.names[i], { "text-anchor": "end", fill: MUTED, "font-size": 13, class: "serif", "font-style": "italic" });
+  txt(g, SX - 20, SY(i) + 14, occ(i), { "text-anchor": "end", fill: YELLOW, "font-size": 15, "font-weight": 700 });
+  words.forEach(w => { const isB = w === B.word, t = txt(g, x, SY(i) + 5, w, { fill: isB ? YELLOW : FG, "font-size": 16, "font-weight": isB ? 700 : 400 });
+    const width = w.length * 9.6; pos.push({ w, x: x + width / 2 }); x += width + 12; });
+  tokPos[i] = pos;
+  return g;
+}
+function strip(i, vals, scale) {
+  const g = el("g", {}, L.b);
+  const cells = vals.map((v, j) => el("rect", { x: SX + j * CW, y: SY(i) + 28, width: CW - 3, height: 22, rx: 3, fill: vc(v, scale) }, g));
+  return { g, cells };
+}
+let strips = [], matrix = null;
+function cosMatrix(M, title) {
+  const g = el("g", {}, L.c), x0 = 935, y0 = 250, c = 64;
+  txt(g, x0, y0 - 46, title, { class: "serif", "font-size": 15 });
+  B.names.forEach((n, j) => { txt(g, x0 + j * c + c / 2, y0 - 10, occ(j), { "text-anchor": "middle", fill: YELLOW, "font-size": 13 });
+    txt(g, x0 - 8, y0 + j * c + c / 2 + 4, occ(j), { "text-anchor": "end", fill: YELLOW, "font-size": 13 }); });
+  [0, 1, 2].forEach(k => txt(g, x0, y0 + 3 * c + 22 + k * 16, `${occ(k)} = “${B.word}” in sentence ${k + 1} (${B.names[k]})`, { fill: MUTED, "font-size": 11 }));
+  const cells = [];
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
+    const v = M[i][j], r = el("rect", { x: x0 + j * c + 1, y: y0 + i * c + 1, width: c - 2, height: c - 2, rx: 4, fill: `rgba(88,196,221,${clamp((v - .5) * 2)})` }, g);
+    const t = txt(g, x0 + j * c + c / 2, y0 + i * c + c / 2 + 5, v.toFixed(2), { "text-anchor": "middle", fill: v > .8 ? "#000" : FG, "font-size": 13 });
+    cells.push({ r, t, i, j });
+  }
+  return { g, cells };
+}
+
+async function stage4() {
+  await wipe();
+  await say(`One vector per word: the three “${B.word}”s of GloVe`, "a static embedding is a row of a table: the same row whatever the sentence");
+  rowsG = B.sentences.map((_, i) => sentenceRow(i));
+  rowsG.forEach(g => g.style.opacity = 0);
+  await tween(700, t => rowsG.forEach((g, i) => g.style.opacity = clamp(t * 2 - i * .4)), x => x);
+  strips = B.sentences.map((_, i) => strip(i, B.static, 1));
+  strips.forEach(s => s.g.style.opacity = 0);
+  await tween(700, t => strips.forEach(s => s.g.style.opacity = t));
+  txt(L.b, SX, SY(0) + 68, `GloVe row of “${B.word}” (24 of 50), copied in every sentence`, { fill: MUTED, "font-size": 12 });
+  matrix = cosMatrix([[1, 1, 1], [1, 1, 1], [1, 1, 1]], `cosine of the 3 “${B.word}” vectors`);
+  matrix.g.style.opacity = 0; await fade(matrix.g, 0, 1);
+  await say("Three meanings, one blend", `GloVe's neighbours of “${B.word}”: banks, securities, banking… the river bank is drowned`);
+}
+
+async function stage5() {
+  await say("Contextual: a Transformer computes one vector per occurrence", "all-MiniLM-L6-v2 (6 layers, 22 M parameters): the vector of each token depends on the whole sentence");
+  const sc = Math.max(...B.ctx.flat().map(Math.abs)) * .8;
+  L.b.querySelectorAll("text").forEach(t => t.textContent = `MiniLM vector of “${B.word}” (24 of 384)`);
+  await tween(1200, t => strips.forEach((s, i) => s.cells.forEach((r, j) => {
+    const v = lerp(B.static[j] / 1, B.ctx[i][j] / sc, t); r.setAttribute("fill", vc(v, 1)); })));
+  await tween(800, t => matrix.cells.forEach(c => { const v = lerp(1, B.cos_ctx[c.i][c.j], t);
+    c.r.setAttribute("fill", `rgba(88,196,221,${clamp((v - .5) * 2)})`); c.t.textContent = v.toFixed(2); c.t.setAttribute("fill", v > .8 ? "#000" : FG); }));
+  await say("The financial banks are closer to each other than to the river bank", "how? each token borrows from the others: the attention of the last layer, from “" + B.word + "”");
+  // attention arcs, from bank to the other words of its sentence
+  for (let i = 0; i < 3; i++) {
+    const pos = tokPos[i], src = pos.find(p => p.w === B.word), A = B.att[i];
+    if (!src) continue;
+    const g = el("g", {}, L.c);
+    const used = new Set([src]);
+    const arcs = A.tokens.map((tk, k) => {
+      const tgt = pos.find(p => p.w === tk && !used.has(p)) || null, w = A.weights[k];
+      if (tgt) used.add(tgt);
+      if (!tgt || w < .04) return null;
+      const h = 30 + Math.abs(tgt.x - src.x) * .18;
+      const path = el("path", { d: `M${src.x},${SY(i) - 14} Q${(src.x + tgt.x) / 2},${SY(i) - 14 - h} ${tgt.x},${SY(i) - 14}`,
+                                fill: "none", stroke: YELLOW, "stroke-width": 1 + 16 * w, "stroke-opacity": .25 + w, "stroke-linecap": "round" }, g);
+      const lab = w >= .1 ? txt(g, (src.x + tgt.x) / 2, SY(i) - 18 - h * .5, w.toFixed(2), { "text-anchor": "middle", fill: YELLOW, "font-size": 11 }) : null;
+      return { path, lab };
+    }).filter(Boolean);
+    g.style.opacity = 0;
+    await fade(g, 0, 1, 500);
+  }
+  txt(L.c, 600, 690, "last layer, mean of the 12 heads, renormalised over the words ([CLS], punctuation and the word itself left out)",
+      { "text-anchor": "middle", class: "serif", "font-size": 13, fill: MUTED, "font-style": "italic" });
+}
+
+// ================================================================== 6 · semantic search
+async function stage6() {
+  await wipe();
+  const S = D.search, n = S.titles.length, q = n;
+  await say(`Semantic search: “${S.query}”`, "every plot encoded once into a unit vector; the query too; one matrix product gives the 12 cosines");
+  const cx = 360, cy = 420, s = 240, X = i => cx + S.xy[i][0] * s, Y = i => cy - S.xy[i][1] * s;
+  const g = el("g", {}, L.a);
+  const order = S.scores.map((v, i) => [v, i]).sort((a, b) => b[0] - a[0]).map(x => x[1]);
+  const top = new Set(order.slice(0, 3));
+  const dots = S.titles.map((t, i) => { const gg = el("g", {}, g);
+    el("circle", { cx: X(i), cy: Y(i), r: 6, fill: BLUE }, gg);
+    txt(gg, X(i) + 9, Y(i) + 4, t, { fill: FG, "font-size": 12 }); gg.style.opacity = 0; return gg; });
+  await tween(800, t => dots.forEach((d, i) => d.style.opacity = clamp(t * 2 - i / n)), x => x);
+  const qg = el("g", {}, g);
+  el("path", { d: `M${X(q)},${Y(q) - 12} l3.5,8 8.5,1 -6.5,5.5 2,8.5 -7.5,-4.5 -7.5,4.5 2,-8.5 -6.5,-5.5 8.5,-1z`, fill: YELLOW }, qg);
+  txt(qg, X(q) + 14, Y(q) - 12, "query", { fill: YELLOW, "font-size": 13, "font-weight": 700 });
+  await fade(qg, 0, 1);
+  const lines = S.titles.map((_, i) => el("line", { x1: X(q), y1: Y(q), x2: X(q), y2: Y(q), stroke: top.has(i) ? YELLOW : "#3A4552",
+                                                   "stroke-width": top.has(i) ? 2 + 6 * Math.max(0, S.scores[i]) : 1, opacity: top.has(i) ? .9 : .5 }, g));
+  lines.forEach(l => g.insertBefore(l, g.firstChild));
+  await tween(900, t => lines.forEach((l, i) => { l.setAttribute("x2", lerp(X(q), X(i), t)); l.setAttribute("y2", lerp(Y(q), Y(i), t)); }));
+  // ranking
+  const R = el("g", {}, L.b), x0 = 780, y0 = 140, mx = Math.max(...S.scores, .01);
+  txt(R, x0, y0 - 10, "cosine with the query, the 12 films", { class: "serif", "font-size": 15 });
+  const bars = order.map((i, k) => { const y = y0 + 10 + k * 34, isT = k < 3;
+    txt(R, x0 + 150, y + 15, S.titles[i], { "text-anchor": "end", fill: isT ? YELLOW : FG, "font-size": 12, "font-weight": isT ? 700 : 400 });
+    const r = el("rect", { x: x0 + 158, y: y + 3, width: 0, height: 18, rx: 3, fill: isT ? YELLOW : "#3A4552" }, R);
+    const v = txt(R, x0 + 164, y + 16, "", { fill: MUTED, "font-size": 11 });
+    return { r, v, s: S.scores[i] }; });
+  await tween(900, t => bars.forEach(b => { const w = Math.max(0, b.s) / mx * 200 * t; b.r.setAttribute("width", w); b.v.setAttribute("x", 780 + 164 + w); b.v.textContent = b.s.toFixed(2); }));
+  const best = order[0], shared = S.shared[best];
+  await say(`Best match: ${S.titles[best]}`, `words in common with the query: ${shared.length ? shared.join(", ") : "none"} · the encoder matches the meaning, not the words`, shared.length ? MUTED : GREEN);
+  txt(L.b, 600, 700, S.plots[best], { "text-anchor": "middle", class: "serif", "font-size": 14, fill: MUTED, "font-style": "italic" });
+}
+
+// ================================================================== controls
+const STAGES = [stage1, stage2, stage3, stage4, stage5, stage6];
+let cur = 0, playing = false, auto = false;
+const chips = [...document.querySelectorAll(".chip")];
+const mark = () => chips.forEach(c => { const k = +c.dataset.stage; c.classList.toggle("active", k === cur); c.classList.toggle("done", k < cur); });
+async function play(k) { if (k < 1 || k > STAGES.length) return; const my = ++runId; cur = k; playing = true; mark();
+  try { await STAGES[k - 1](); } catch (e) { if (!(e instanceof Cancel)) throw e; return; }
+  if (my !== runId) return; playing = false;
+  if (auto && cur < STAGES.length) { await new Promise(r => setTimeout(r, 900 / speed)); if (my === runId && auto) play(cur + 1); } else auto = false; }
+async function jump(k) { runId++; playing = false; clearAll(); instant = true; try { for (let s = 1; s <= k; s++) await STAGES[s - 1](); } finally { instant = false; } cur = k; mark(); }
+document.getElementById("next").onclick = () => { auto = false; if (playing) jump(cur); else if (cur < STAGES.length) play(cur + 1); };
+document.getElementById("back").onclick = () => { auto = false; if (cur > 1) jump(cur - 1); };
+document.getElementById("auto").onclick = () => { auto = true; if (!playing) { if (cur >= STAGES.length) jump(0).then(() => play(1)); else play(cur + 1); } };
+document.getElementById("restart").onclick = () => { auto = false; jump(0).then(() => play(1)); };
+document.getElementById("speed").onchange = e => speed = parseFloat(e.target.value);
+chips.forEach(c => c.onclick = () => { auto = false; const k = +c.dataset.stage; jump(k - 1).then(() => play(k)); });
+(document.fonts ? document.fonts.ready : Promise.resolve()).then(() => play(1));
+</script>
+</body>
+</html>

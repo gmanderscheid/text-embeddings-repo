@@ -1,0 +1,473 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Source+Serif+4:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+  :root { --bg: #000000; --fg: #ECEFF4; --muted: #7D8590; --blue: #58C4DD; --yellow: #F7D96F; }
+  html, body { margin: 0; background: transparent; font-family: "Source Serif 4", Georgia, serif; }
+  .wrap { background: var(--bg); border: 1px solid #22262E; border-radius: 14px; overflow: hidden; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 14px;
+         border-bottom: 1px solid #22262E; font-family: "JetBrains Mono", monospace; font-size: 13px; color: var(--fg); }
+  .chip { color: var(--muted); border: 1px solid #2C313A; border-radius: 999px; padding: 4px 12px;
+          cursor: pointer; user-select: none; transition: all .25s; }
+  .chip:hover { color: var(--fg); border-color: #444B57; }
+  .chip.done { color: var(--fg); }
+  .chip.active { color: var(--bg); background: var(--yellow); border-color: var(--yellow); }
+  .spacer { flex: 1; }
+  button, select { font-family: inherit; font-size: 13px; color: var(--fg); background: #1A1E25;
+                   border: 1px solid #2C313A; border-radius: 8px; padding: 5px 12px; cursor: pointer; }
+  button:hover, select:hover { border-color: var(--blue); }
+  button.primary { background: var(--blue); color: var(--bg); border-color: var(--blue); font-weight: 700; }
+  .toggle button.on { background: #F7D96F; color: #000; border-color: #F7D96F; font-weight: 700; }
+  svg { display: block; width: 100%; height: auto; }
+  .mono { font-family: "JetBrains Mono", monospace; }
+  .serif { font-family: "Source Serif 4", Georgia, serif; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <span class="chip" data-stage="1">1 · tokens</span>
+    <span class="chip" data-stage="2">2 · padding</span>
+    <span class="chip" data-stage="3">3 · embeddings</span>
+    <span class="chip" data-stage="4">4 · pooling</span>
+    <span class="chip" data-stage="5">5 · model</span>
+    <span class="toggle">pooling:
+      <button data-mode="mean" class="on">mean</button><button data-mode="max">max</button></span>
+    <span class="spacer"></span>
+    <button id="back">◀</button>
+    <button id="next" class="primary">next ▶</button>
+    <button id="auto">auto ▶▶</button>
+    <button id="restart">⟲</button>
+    <select id="speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option>
+      <option value="1.5">1.5×</option><option value="2.5">2.5×</option></select>
+  </div>
+  <svg id="stage" viewBox="0 0 1200 720" preserveAspectRatio="xMidYMid meet"></svg>
+</div>
+
+<script>
+const D = __DATA__;
+const NS = "http://www.w3.org/2000/svg";
+const svg = document.getElementById("stage");
+const FG = "#ECEFF4", MUTED = "#7D8590", BG = "#000000", DIM = "#2A3038";
+const BLUE = "#58C4DD", YELLOW = "#F7D96F", RED = "#FC6255", GREEN = "#83C167", TEAL = "#5CD0B3";
+const SENT_COLORS = ["#58C4DD", "#83C167", "#F0AC5F", "#D147BD"];
+const CLASS_COLORS = { neutral: "#F6970A", positive: "#0ECDD0", negative: "#FE0162" };
+
+// ------------------------------------------------------------------ helpers
+function el(tag, attrs = {}, parent = svg) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  parent.appendChild(e);
+  return e;
+}
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const smooth = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+const f2 = v => (v >= 0 ? " " : "") + (Math.abs(v) < .005 ? 0 : v).toFixed(2);
+function hex2rgb(h) { return [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)); }
+const C0 = hex2rgb("#1E232B"), CN = hex2rgb(BLUE), CP = hex2rgb(RED);
+function valueColor(v) {
+  const t = clamp(Math.abs(v) / 1.4), c = v < 0 ? CN : CP;
+  const m = C0.map((a, i) => Math.round(lerp(a, c[i], t)));
+  return `rgb(${m[0]},${m[1]},${m[2]})`;
+}
+const textColor = v => Math.abs(v) > 1 ? BG : FG;
+const place = (g, x, y, s = 1) => g.setAttribute("transform", `translate(${x},${y}) scale(${s})`);
+
+let speed = 1, instant = false, runId = 0;
+class Cancel extends Error {}
+function tween(ms, fn, easing = smooth) {
+  const my = runId;
+  if (instant) { fn(1); return Promise.resolve(); }
+  return new Promise((resolve, reject) => {
+    const t0 = performance.now(), dur = Math.max(1, ms / speed);
+    function frame(now) {
+      if (my !== runId) return reject(new Cancel());
+      const t = clamp((now - t0) / dur);
+      fn(easing(t));
+      if (t < 1) requestAnimationFrame(frame); else resolve();
+    }
+    requestAnimationFrame(frame);
+  });
+}
+const wait = ms => tween(ms, () => {});
+const fade = (e, a, b, ms = 400) => tween(ms, t => e.style.opacity = lerp(a, b, t));
+
+// ------------------------------------------------------------------ layers and caption
+const L = {};
+for (const n of ["caption", "rows", "cols", "pool", "model", "ghost"]) L[n] = el("g", { id: n });
+const capMain = el("text", { x: 600, y: 46, "text-anchor": "middle", class: "serif", "font-size": 26, fill: FG, "font-weight": 600 }, L.caption);
+const capSub = el("text", { x: 600, y: 76, "text-anchor": "middle", class: "serif", "font-size": 17, fill: MUTED, "font-style": "italic" }, L.caption);
+async function say(main, sub = "", subColor = MUTED) {
+  await tween(200, t => { capMain.style.opacity = 1 - t; capSub.style.opacity = 1 - t; });
+  capMain.textContent = main; capSub.textContent = sub; capSub.setAttribute("fill", subColor);
+  await tween(350, t => { capMain.style.opacity = t; capSub.style.opacity = t; });
+}
+
+// ------------------------------------------------------------------ geometry
+const S = D.sents, NS_ = S.length, LEN = D.L, ND = D.dims.length, F = D.focus;
+const CW = 78, BW = 72, X0 = 190;                         // token columns
+const colX = j => X0 + j * CW + CW / 2;
+const RX1 = 1040, RX2 = 1125;                             // pooled result columns
+const rowY = i => 165 + i * (NS_ > 3 ? 72 : 85);           // stages 1-2: one row of boxes per sentence
+const BLOCK = (560 - 10) / NS_, CH = Math.min(17, (BLOCK - 40) / ND);
+const blockTop = i => 132 + i * BLOCK + 22;                // stage 3+: one block of columns per sentence
+const cellY = (i, d) => blockTop(i) + d * CH + CH / 2;
+let mode = "mean";
+
+// ------------------------------------------------------------------ state
+let boxes = [], cols = [], results = [];
+function clearAll() {
+  for (const k in L) if (k !== "caption") { L[k].replaceChildren(); L[k].style.opacity = 1; }
+  capMain.textContent = ""; capSub.textContent = "";
+  boxes = []; cols = []; results = [];
+}
+
+function tokenBox(parent, text, color, dashed = false, unknown = false) {
+  const g = el("g", {}, parent);
+  el("rect", { x: -BW / 2, y: -19, width: BW, height: 38, rx: 8, fill: dashed ? "none" : color, "fill-opacity": .12,
+               stroke: unknown ? RED : dashed ? "#4A515C" : color, "stroke-width": 2,
+               "stroke-dasharray": dashed ? "5 4" : "none" }, g);
+  const size = text.length > 8 ? 12 : text.length > 6 ? 14 : 16;
+  const t = el("text", { "text-anchor": "middle", "dominant-baseline": "central", class: "mono", "font-size": size,
+                         fill: dashed ? MUTED : unknown ? RED : color }, g);
+  t.textContent = text;
+  return g;
+}
+
+// ================================================================== stage 1: tokens
+async function stage1() {
+  const lens = S.map(s => s.tokens.length);
+  await say(`${NS_} sentences, ${new Set(lens).size > 1 ? "different lengths" : "one length"}: ${lens.join(", ")} tokens`,
+            "a tensor must be a rectangle: how do we stack rows of different lengths?");
+  S.forEach((s, i) => {
+    const lab = el("text", { x: X0 - 30, y: rowY(i), "text-anchor": "end", "dominant-baseline": "central", class: "serif",
+                             "font-size": 18, "font-style": "italic", fill: SENT_COLORS[i] }, L.rows);
+    lab.textContent = `sentence ${i + 1}`;
+    lab.dataset.row = i;
+    boxes[i] = s.tokens.map((tok, j) => {
+      const g = tokenBox(L.rows, tok, SENT_COLORS[i]);
+      place(g, colX(j), rowY(i)); g.style.opacity = 0;
+      return g;
+    });
+  });
+  const all = boxes.flatMap((r, i) => r.map((g, j) => ({ g, k: j + i * 2 })));
+  await tween(900, t => all.forEach(({ g, k }) => g.style.opacity = clamp(t * 2.2 - k * .08)), x => x);
+  const sizes = el("g", {}, L.rows);
+  S.forEach((s, i) => {
+    const t = el("text", { x: colX(s.tokens.length - 1) + BW / 2 + 16, y: rowY(i), "dominant-baseline": "central",
+                           class: "mono", "font-size": 14, fill: MUTED }, sizes);
+    t.textContent = `${s.tokens.length} tokens`;
+    t.dataset.lenLabel = 1;
+  });
+  await fade(sizes, 0, 1);
+}
+
+// ================================================================== stage 2: padding + mask
+let pads = [], maskRow = [];
+async function stage2() {
+  await say(`Pad to the longest sentence: (batch, length) = (${NS_}, ${LEN})`,
+            "a <pad> token fills every row up to the same length");
+  L.rows.querySelectorAll("[data-len-label]").forEach(t => t.remove());
+  pads = S.map((s, i) => {
+    const out = [];
+    for (let j = s.tokens.length; j < LEN; j++) {
+      const g = tokenBox(L.rows, "<pad>", MUTED, true);
+      place(g, 1180, rowY(i)); g.style.opacity = 0;
+      out.push({ g, j });
+    }
+    return out;
+  });
+  await tween(1000, t => pads.forEach((row, i) => row.forEach(({ g, j }, k) => {
+    const u = smooth(clamp(t * 1.5 - k * .08));
+    place(g, lerp(1180, colX(j), u), rowY(i)); g.style.opacity = u;
+  })), x => x);
+
+  await say("The mask remembers what is real", "1 for a word, 0 for padding: every later step must look at it");
+  maskRow = S.map((s, i) => {
+    const g = el("g", {}, L.rows);
+    for (let j = 0; j < LEN; j++) {
+      const real = j < s.tokens.length;
+      const t = el("text", { x: colX(j), y: rowY(i) + 32, "text-anchor": "middle", class: "mono", "font-size": 13,
+                             fill: real ? TEAL : MUTED, "font-weight": 700 }, g);
+      t.textContent = real ? "1" : "0";
+    }
+    const lab = el("text", { x: X0 - 30, y: rowY(i) + 32, "text-anchor": "end", class: "mono", "font-size": 12, fill: MUTED }, g);
+    lab.textContent = "mask";
+    g.style.opacity = 0;
+    return g;
+  });
+  await tween(500, t => maskRow.forEach(g => g.style.opacity = t));
+}
+
+// ================================================================== stage 3: embeddings
+function buildColumn(i, j) {
+  const s = S[i], real = j < s.tokens.length, known = real && s.known[j];
+  const vec = real ? s.vecs[j] : new Array(ND).fill(0);
+  const g = el("g", {}, L.cols);
+  const cells = vec.map((v, d) => {
+    const c = el("g", {}, g);
+    const r = el("rect", { x: colX(j) - BW / 2, y: cellY(i, d) - CH / 2 + 1, width: BW, height: CH - 2, rx: 3,
+                           fill: real && known ? valueColor(v) : "#151920",
+                           stroke: real && !known ? RED : !real ? "#2A3038" : "none", "stroke-dasharray": real ? "none" : "3 3" }, c);
+    const t = el("text", { x: colX(j), y: cellY(i, d), "text-anchor": "middle", "dominant-baseline": "central",
+                           class: "mono", "font-size": CH >= 14 ? 10 : 8, fill: real && known ? textColor(v) : MUTED }, c);
+    t.textContent = f2(v);
+    return { c, r, t, v };
+  });
+  const label = el("text", { x: colX(j), y: blockTop(i) - 8, "text-anchor": "middle", class: "mono", "font-size": 12,
+                             fill: !real ? MUTED : known ? SENT_COLORS[i] : RED }, g);
+  label.textContent = real ? s.tokens[j] : "<pad>";
+  return { g, cells, real, known, i, j, label };
+}
+
+async function stage3() {
+  await say(`Each token becomes its GloVe vector: (batch, length, dim) = (${NS_}, ${LEN}, ${D.D})`,
+            `showing ${ND} of the ${D.D} numbers · <pad> and words GloVe does not know get zeros`);
+  // the boxes travel to the top of their block and fade, the columns grow under them
+  const allBoxes = [];
+  S.forEach((s, i) => {
+    boxes[i].forEach((g, j) => allBoxes.push({ g, i, j }));
+    pads[i].forEach(({ g, j }) => allBoxes.push({ g, i, j }));
+  });
+  await tween(800, t => {
+    allBoxes.forEach(({ g, i, j }) => { place(g, colX(j), lerp(rowY(i), blockTop(i) - 12, t), lerp(1, .5, t)); g.style.opacity = 1 - t; });
+    maskRow.forEach(g => g.style.opacity = 1 - t);
+    L.rows.querySelectorAll("text[data-row]").forEach(lab => {
+      const i = +lab.dataset.row; lab.setAttribute("y", lerp(rowY(i), blockTop(i) + ND * CH / 2, t));
+    });
+  });
+  allBoxes.forEach(({ g }) => g.remove());
+  maskRow.forEach(g => g.remove());
+  cols = S.map((s, i) => Array.from({ length: LEN }, (_, j) => buildColumn(i, j)));
+  const flat = cols.flat();
+  flat.forEach(c => c.g.style.opacity = 0);
+  await tween(1000, t => flat.forEach(c => {
+    const u = smooth(clamp(t * 1.6 - (c.j / LEN) * .4 - c.i * .12));
+    c.g.style.opacity = u;
+    c.g.setAttribute("transform", `translate(0,${blockTop(c.i)}) scale(1,${Math.max(.01, u)}) translate(0,${-blockTop(c.i)})`);
+  }), x => x);
+  const unknown = S.flatMap(s => s.tokens.filter((t, j) => !s.known[j]));
+  if (unknown.length) await say(capMain.textContent, `unknown to GloVe → zeros and mask 0: ${unknown.join(", ")}`, RED);
+}
+
+// ================================================================== stage 4: pooling
+function resultColumn(i, values, x, title, color, faded = false) {
+  const g = el("g", {}, L.pool);
+  values.forEach((v, d) => {
+    el("rect", { x: x - BW / 2, y: cellY(i, d) - CH / 2 + 1, width: BW, height: CH - 2, rx: 3, fill: valueColor(v),
+                 stroke: faded ? "none" : color, "stroke-width": 1.5 }, g);
+    const t = el("text", { x, y: cellY(i, d), "text-anchor": "middle", "dominant-baseline": "central", class: "mono",
+                           "font-size": CH >= 14 ? 10 : 8, fill: textColor(v) }, g);
+    t.textContent = f2(v);
+  });
+  const lab = el("text", { x, y: blockTop(i) - 8, "text-anchor": "middle", class: "mono", "font-size": 12, fill: color }, g);
+  lab.textContent = title;
+  if (faded) g.style.opacity = .55;
+  return g;
+}
+
+function flyCells(fromCols, i, x, ms, pick) {
+  // copies of cells travel to the result column x; pick(col, d) says if a cell takes part
+  const flying = [];
+  fromCols.forEach(col => col.cells.forEach((cell, d) => {
+    if (!pick(col, d)) return;
+    const g = el("g", {}, L.ghost);
+    el("rect", { x: -BW / 2, y: -CH / 2 + 1, width: BW, height: CH - 2, rx: 3, fill: cell.r.getAttribute("fill") }, g);
+    flying.push({ g, x0: colX(col.j), y: cellY(i, d), k: col.j });
+  }));
+  return tween(ms, t => flying.forEach(f => {
+    const u = smooth(clamp(t * 1.4 - f.k / LEN * .4));
+    place(f.g, lerp(f.x0, x, u), f.y - Math.sin(Math.PI * u) * 18); f.g.style.opacity = 1 - u * .85;
+  }), x => x).then(() => flying.forEach(f => f.g.remove()));
+}
+
+async function maskOut(i) {
+  const masked = cols[i].filter(c => !(c.real && c.known));
+  masked.forEach(c => {
+    const x = colX(c.j), y0 = blockTop(i), y1 = blockTop(i) + ND * CH;
+    const cross = el("path", { d: `M${x - BW / 2 + 6},${y0} L${x + BW / 2 - 6},${y1} M${x + BW / 2 - 6},${y0} L${x - BW / 2 + 6},${y1}`,
+                               stroke: RED, "stroke-width": 2.5, fill: "none" }, c.g);
+    cross.style.opacity = 0; c.cross = cross;
+  });
+  await tween(500, t => masked.forEach(c => { c.cross.style.opacity = t; c.cells.forEach(x => x.c.style.opacity = 1 - .6 * t); }));
+}
+
+async function stage4() {
+  L.pool.replaceChildren(); L.ghost.replaceChildren();
+  results = [];
+  const others = cols.filter((_, i) => i !== F).flat();
+  await tween(400, t => others.forEach(c => c.g.style.opacity = 1 - .75 * t));
+  const realCols = cols[F].filter(c => c.real && c.known);
+
+  if (mode === "mean") {
+    await say(`Mean pooling of sentence ${F + 1}: one number per dimension`,
+              "average each row over the real words only: the mask (0) removes the pads");
+    await maskOut(F);
+    await flyCells(cols[F], F, RX1, 1200, c => c.real && c.known);
+    const r = resultColumn(F, D.pooled.mean[F], RX1, "mean", YELLOW);
+    await fade(r, 0, 1, 400);
+    results[F] = r;
+    await say("Forget the mask, and the pads pull everything toward 0",
+              `a plain average over all ${LEN} positions: same words, smaller numbers, a different vector`);
+    await flyCells(cols[F], F, RX2, 1000, () => true);
+    const bad = resultColumn(F, D.pooled.mean_nomask[F], RX2, "no mask", RED, true);
+    await fade(bad, 0, .55, 400);
+  } else {
+    await say(`Max pooling of sentence ${F + 1}: keep the strongest value of each dimension`,
+              "for each row, the largest number among the real words wins; pads are set to −∞ so they never win");
+    await maskOut(F);
+    cols[F].filter(c => !(c.real && c.known)).forEach(c => c.cells.forEach(x => x.t.textContent = "−∞"));
+    // the winner of each row lights up, then travels to the result
+    const winners = [];
+    for (let d = 0; d < ND; d++) {
+      let best = null;
+      realCols.forEach(c => { if (!best || c.cells[d].v > best.cells[d].v) best = c; });
+      if (best) winners.push({ col: best, d });
+    }
+    winners.forEach(w => w.col.cells[w.d].r.setAttribute("stroke", YELLOW));
+    winners.forEach(w => w.col.cells[w.d].r.setAttribute("stroke-width", 2.5));
+    await wait(700);
+    await flyCells(cols[F], F, RX1, 1000, (c, d) => winners.some(w => w.col === c && w.d === d));
+    const r = resultColumn(F, D.pooled.max[F], RX1, "max", YELLOW);
+    await fade(r, 0, 1, 400);
+    results[F] = r;
+    if (D.negDim >= 0) {
+      await say(`Dimension ${D.dims[D.negDim]}: every word is negative`,
+                "with pads at 0 instead of −∞, a pad would win this row: the vector would say “0”, not the words");
+      const bad = resultColumn(F, D.pooled.max_zeropad[F], RX2, "0-pads", RED, true);
+      await fade(bad, 0, .55, 400);
+      const y = cellY(F, D.negDim);
+      const hl = el("rect", { x: X0 - 8, y: y - CH / 2 - 1, width: RX2 + BW / 2 + 8 - (X0 - 8), height: CH + 2, rx: 4,
+                              fill: "none", stroke: YELLOW, "stroke-width": 2, "stroke-dasharray": "6 4" }, L.pool);
+      await fade(hl, 0, 1, 400);
+    }
+  }
+  await wait(900);
+
+  // the other sentences, all at once
+  await say(`Every sentence → one vector of ${D.D} numbers, whatever its length`,
+            `${mode} pooling, mask applied: (batch, length, dim) = (${NS_}, ${LEN}, ${D.D}) → (batch, dim) = (${NS_}, ${D.D})`);
+  await tween(400, t => others.forEach(c => c.g.style.opacity = .25 + .75 * t));
+  const rest = S.map((_, i) => i).filter(i => i !== F);
+  for (const i of rest) maskOut(i);
+  await Promise.all(rest.map(i => flyCells(cols[i], i, RX1, 1100, (c, d) => c.real && c.known)));
+  rest.forEach(i => { results[i] = resultColumn(i, D.pooled[mode][i], RX1, mode, YELLOW); });
+}
+
+// ================================================================== stage 5: the model
+async function stage5() {
+  await say("Now a classic model can read the reviews", "XGBoost trained on 800 hotel reviews, each turned into one pooled GloVe vector");
+  await tween(500, t => { L.cols.style.opacity = 1 - t; L.rows.style.opacity = 1 - t;
+    L.pool.querySelectorAll("g").forEach(g => { if (!results.includes(g)) g.style.opacity = (1 - t) * .55; });
+    L.pool.querySelectorAll(":scope > rect").forEach(r => r.style.opacity = 1 - t); });
+  // the pooled columns line up side by side: the (batch, dim) matrix
+  const MX = 330, MT = 230, mch = 22, mw = 64;
+  const mats = S.map((s, i) => {
+    const g = el("g", {}, L.model);
+    D.pooled[mode][i].forEach((v, d) => {
+      el("rect", { x: -mw / 2, y: d * mch, width: mw, height: mch - 2, rx: 3, fill: valueColor(v) }, g);
+      const t = el("text", { x: 0, y: d * mch + mch / 2 - 1, "text-anchor": "middle", "dominant-baseline": "central",
+                             class: "mono", "font-size": 10, fill: textColor(v) }, g);
+      t.textContent = f2(v);
+    });
+    const lab = el("text", { x: 0, y: -10, "text-anchor": "middle", class: "serif", "font-size": 15, "font-style": "italic",
+                             fill: SENT_COLORS[i] }, g);
+    lab.textContent = `sentence ${i + 1}`;
+    return { g, x0: RX1, y0: blockTop(i), x1: MX + i * (mw + 14), y1: MT };
+  });
+  await tween(1000, t => {
+    results.forEach(r => r.style.opacity = 1 - t);
+    mats.forEach(m => { place(m.g, lerp(m.x0, m.x1, t), lerp(m.y0, m.y1, t)); });
+  });
+  const last = MX + (NS_ - 1) * (mw + 14) + mw / 2;
+  const shape = el("text", { x: (MX - mw / 2 + last) / 2, y: MT + ND * mch + 30, "text-anchor": "middle", class: "mono",
+                             "font-size": 15, fill: MUTED }, L.model);
+  shape.textContent = `(batch, dim) = (${NS_}, ${D.D}) · ${ND} rows shown`;
+  // arrow into the model box
+  const bx = last + 60, mid = MT + ND * mch / 2;
+  const arrow = el("path", { d: `M${last + 14},${mid} L${bx - 8},${mid}`, stroke: FG, "stroke-width": 2.5, fill: "none",
+                             "marker-end": "url(#tip)" }, L.model);
+  const defs = el("defs", {}, L.model);
+  const mk = el("marker", { id: "tip", viewBox: "0 0 10 10", refX: 8, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto" }, defs);
+  el("path", { d: "M0,0 L10,5 L0,10 z", fill: FG }, mk);
+  const box = el("g", {}, L.model);
+  el("rect", { x: bx, y: mid - 50, width: 150, height: 100, rx: 14, fill: "#11161E", stroke: YELLOW, "stroke-width": 2 }, box);
+  const bt = el("text", { x: bx + 75, y: mid - 8, "text-anchor": "middle", class: "serif", "font-size": 22, "font-weight": 600, fill: YELLOW }, box);
+  bt.textContent = "XGBoost";
+  const bs = el("text", { x: bx + 75, y: mid + 18, "text-anchor": "middle", class: "mono", "font-size": 12, fill: MUTED }, box);
+  bs.textContent = `${D.D} features in`;
+  [arrow, box, shape].forEach(e => e.style.opacity = 0);
+  await tween(600, t => [arrow, box, shape].forEach(e => e.style.opacity = t));
+
+  // predicted probabilities, one block per sentence
+  const OX = bx + 200, ow = 1170 - OX, rowH = Math.min(120, 440 / NS_);
+  const outs = el("g", {}, L.model);
+  const bars = [];
+  S.forEach((s, i) => {
+    const y = 150 + i * rowH;
+    const title = el("text", { x: OX, y, class: "serif", "font-size": 15, "font-style": "italic", fill: SENT_COLORS[i] }, outs);
+    title.textContent = `sentence ${i + 1}: “${s.tokens.slice(0, 5).join(" ")}${s.tokens.length > 5 ? " …" : ""}”`;
+    const p = D.preds[mode][i], best = p.indexOf(Math.max(...p));
+    D.classes.forEach((c, k) => {
+      const yy = y + 12 + k * 22;
+      const lab = el("text", { x: OX + 70, y: yy + 9, "text-anchor": "end", class: "mono", "font-size": 12,
+                               fill: k === best ? FG : MUTED, "font-weight": k === best ? 700 : 400 }, outs);
+      lab.textContent = c;
+      const r = el("rect", { x: OX + 78, y: yy, width: 0, height: 16, rx: 3, fill: CLASS_COLORS[c], "fill-opacity": k === best ? 1 : .45 }, outs);
+      const v = el("text", { x: OX + 84, y: yy + 9, "dominant-baseline": "central", class: "mono", "font-size": 12, fill: FG }, outs);
+      bars.push({ r, v, p: p[k], w: (ow - 140) });
+    });
+  });
+  await tween(900, t => bars.forEach(b => {
+    b.r.setAttribute("width", b.w * b.p * t);
+    b.v.setAttribute("x", 84 + OX + b.w * b.p * t); b.v.textContent = `${Math.round(b.p * 100 * t)}%`;
+  }));
+  await say("One vector per text, whatever its length", "padding + mask + pooling: the bridge between sequences and any classic model");
+}
+
+// ================================================================== controls
+const STAGES = [stage1, stage2, stage3, stage4, stage5];
+let cur = 0, playing = false, auto = false;
+const chips = [...document.querySelectorAll(".chip")];
+function markChips() {
+  chips.forEach(c => { const k = +c.dataset.stage; c.classList.toggle("active", k === cur); c.classList.toggle("done", k < cur); });
+}
+async function play(k) {
+  if (k < 1 || k > STAGES.length) return;
+  const my = ++runId;
+  cur = k; playing = true; markChips();
+  try { await STAGES[k - 1](); } catch (e) { if (!(e instanceof Cancel)) throw e; return; }
+  if (my !== runId) return;
+  playing = false;
+  if (auto && cur < STAGES.length) { await new Promise(r => setTimeout(r, 900 / speed)); if (my === runId && auto) play(cur + 1); }
+  else auto = false;
+}
+async function jump(k) {
+  runId++; playing = false;
+  clearAll();
+  instant = true;
+  try { for (let s = 1; s <= k; s++) await STAGES[s - 1](); } finally { instant = false; }
+  cur = k; markChips();
+}
+document.getElementById("next").onclick = () => { auto = false; if (playing) jump(cur); else if (cur < STAGES.length) play(cur + 1); };
+document.getElementById("back").onclick = () => { auto = false; if (cur > 1) jump(cur - 1); };
+document.getElementById("auto").onclick = () => {
+  auto = true;
+  if (!playing) { if (cur >= STAGES.length) jump(0).then(() => play(1)); else play(cur + 1); }
+};
+document.getElementById("restart").onclick = () => { auto = false; jump(0).then(() => play(1)); };
+document.getElementById("speed").onchange = e => speed = parseFloat(e.target.value);
+chips.forEach(c => c.onclick = () => { auto = false; const k = +c.dataset.stage; jump(k - 1).then(() => play(k)); });
+document.querySelectorAll(".toggle button").forEach(b => b.onclick = () => {
+  mode = b.dataset.mode;
+  document.querySelectorAll(".toggle button").forEach(x => x.classList.toggle("on", x === b));
+  if (cur >= 4) { auto = false; const target = cur; jump(3).then(() => play(4)).then(() => { if (target === 5) play(5); }); }
+});
+
+(document.fonts ? document.fonts.ready : Promise.resolve()).then(() => play(1));
+</script>
+</body>
+</html>

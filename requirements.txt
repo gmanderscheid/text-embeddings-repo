@@ -1,0 +1,13 @@
+--extra-index-url https://download.pytorch.org/whl/cpu   # CPU build of torch: nothing here needs a GPU
+streamlit>=1.36
+numpy
+pandas
+plotly
+matplotlib                     # colour gradient of the tables (pandas Styler)
+scikit-learn                   # Text to features: vectorizers, logistic regression
+xgboost                        # Padding & pooling: classifier on pooled embeddings
+torch                          # Text to vectors: nn.Embedding
+tokenizers                     # Text to vectors: GPT-2 tokenizer
+sentence-transformers          # Pretrained embeddings: all-MiniLM-L6-v2
+spacy                          # Text to features: the lemmatize option
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
